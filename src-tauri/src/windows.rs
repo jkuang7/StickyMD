@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use anyhow::{anyhow, Context};
+use anyhow::{bail, Context};
 use tauri::{
     AppHandle, Emitter, EventTarget, Manager, PhysicalPosition, PhysicalSize, WebviewWindow, WindowEvent,
 };
@@ -211,6 +211,7 @@ pub fn create_sticky(app: &AppHandle, payload: Option<&Note>) -> Result<WebviewW
             .decorations(false)
             .resizable(true)
             .visible(true)
+            .accept_first_mouse(true)
             .inner_size(300.0, 250.0);
 
     if let Some(note) = payload {
@@ -222,7 +223,8 @@ pub fn create_sticky(app: &AppHandle, payload: Option<&Note>) -> Result<WebviewW
         
         builder = builder
             .initialization_script(init_script)
-            .inner_size(note.width as f64, note.height as f64);
+            .inner_size(note.width as f64, note.height as f64)
+            .always_on_top(note.always_on_top);
 
         if app.monitor_from_point(note.x as f64, note.y as f64)?.is_some() {
             builder = builder.position(note.x as f64, note.y as f64);
@@ -233,13 +235,9 @@ pub fn create_sticky(app: &AppHandle, payload: Option<&Note>) -> Result<WebviewW
 
     let window = builder.build().context("Could not create sticky window")?;
     let app_clone = app.clone();
-    let window_clone = window.clone();
     window.on_window_event(move |event| match event {
         WindowEvent::CloseRequested { .. } => {
             let _ = cycle_focus(&app_clone, false);
-        }
-        WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
-            _ = window_clone.emit("save_request", {});
         }
         _ => {}
     });
@@ -266,7 +264,7 @@ pub fn close_sticky(app: &AppHandle) -> Result<(), anyhow::Error> {
         save_sticky(app, window.label(), None)?;
         Ok(())
     } else {
-        Err(anyhow!("No window currently focused!"))
+        bail!("No window currently focused!")
     }
 }
 
@@ -328,4 +326,12 @@ pub fn reset_note_positions(app: &AppHandle) -> anyhow::Result<()> {
             window.set_position(PhysicalPosition { x: 0, y: 0 }).context("could not set note position")
         })
         .collect::<Result<(), anyhow::Error>>()
+}
+
+pub fn set_always_on_top(app: &AppHandle, always_on_top: bool) -> anyhow::Result<()> {
+    if let Some(window) = get_focused_window(app) {
+        window.set_always_on_top(always_on_top).context("Could not set window always on top")
+    } else {
+        bail!("No window currently focused!")
+    }
 }
