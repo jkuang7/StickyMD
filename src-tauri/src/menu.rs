@@ -241,7 +241,7 @@ fn create_help_menu(app: &AppHandle) -> Result<Submenu<Wry>, anyhow::Error> {
                 true,
                 Some("Cmd+/"),
             )?,
-            &MenuItem::with_id(app, MenuCommand::ShowVersion, "Update…", true, None::<&str>)?,
+            &MenuItem::with_id(app, MenuCommand::ShowVersion, "Update", true, None::<&str>)?,
         ])
         .build()
         .map_err(Into::into)

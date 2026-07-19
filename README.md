@@ -17,7 +17,7 @@ That command handles everything and opens Sticky when it is done. The first inst
 ## Update
 
 1. Open **Sticky**.
-2. In the menu bar at the top of the screen, click **Help**, then **Update…**.
+2. In the menu bar at the top of the screen, click **Help**, then **Update**.
 3. If you see **Update available**, click **Update**.
 4. Leave the Terminal window open while Sticky updates. Sticky will close and reopen when it is done.
 
