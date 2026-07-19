@@ -132,9 +132,9 @@ button {
   border-width: 0 2px 2px 0;
   content: "";
   height: 6px;
-  left: 4px;
+  left: 3px;
   position: absolute;
-  top: 1px;
+  top: 0;
   transform: rotate(45deg);
   width: 3px;
 }
