@@ -16,7 +16,12 @@ That command handles everything and opens Sticky when it is done. The first inst
 
 ## Update
 
-In Sticky, choose **Help → Version…**. Sticky checks the current GitHub `main` commit only when that window opens. If a different build is available, click **Update**; the installation runs visibly in Terminal, then Sticky reopens when it is finished. Updating Sticky does not replace your notes.
+1. Open **Sticky**.
+2. In the menu bar at the top of the screen, click **Help**, then **Version…**.
+3. If you see **Update available**, click **Update**.
+4. Leave the Terminal window open while Sticky updates. Sticky will close and reopen when it is done.
+
+If you see **Up to date**, you already have the latest version. Your notes stay safe during an update.
 
 ## If macOS blocks Sticky
 
