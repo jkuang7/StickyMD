@@ -7,8 +7,8 @@ use crate::{
     save_load::{note_id_from_label, NoteRepository},
     settings::MenuSettings,
     windows::{
-        arrange_notes_on_this_side_below, close_window_and_archive, create_sticky,
-        set_window_collapsed, sorted_windows, GeometryIndex,
+        apply_note_pin_state, arrange_notes_on_this_side_below, close_window_and_archive,
+        create_sticky, set_window_collapsed, sorted_windows, GeometryIndex,
     },
 };
 
@@ -230,9 +230,7 @@ pub fn set_note_always_on_top(
     window: tauri::WebviewWindow,
     always_on_top: bool,
 ) -> Result<(), String> {
-    window
-        .set_always_on_top(always_on_top)
-        .map_err(|error| error.to_string())?;
+    apply_note_pin_state(&window, always_on_top).map_err(|error| error.to_string())?;
     let id = note_id_from_label(window.label()).map_err(|error| error.to_string())?;
     window
         .state::<NoteRepository>()

@@ -33,6 +33,29 @@ pub struct NoteGeometry {
 #[derive(Default)]
 pub struct GeometryIndex(Mutex<HashMap<String, NoteGeometry>>);
 
+pub fn apply_note_pin_state(window: &WebviewWindow, pinned: bool) -> anyhow::Result<()> {
+    window.set_always_on_top(pinned)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+
+        let ns_window_ptr = window.ns_window()?;
+        let mut collection_behavior =
+            NSWindowCollectionBehavior::IgnoresCycle | NSWindowCollectionBehavior::Transient;
+        if pinned {
+            collection_behavior |= NSWindowCollectionBehavior::CanJoinAllApplications;
+        }
+
+        unsafe {
+            let ns_window = &*(ns_window_ptr as *const NSWindow);
+            ns_window.setCollectionBehavior(collection_behavior);
+        }
+    }
+
+    Ok(())
+}
+
 impl GeometryIndex {
     fn insert(&self, id: String, geometry: NoteGeometry) -> anyhow::Result<()> {
         self.0
@@ -821,20 +844,7 @@ pub fn open_sticky(app: &AppHandle, note: &StoredNote) -> Result<WebviewWindow, 
         }
     });
 
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_app_kit::NSWindow;
-
-        let ns_window_ptr = window.ns_window().unwrap();
-        unsafe {
-            use objc2_app_kit::NSWindowCollectionBehavior;
-
-            let ns_window = &mut *(ns_window_ptr as *mut NSWindow);
-            ns_window.setCollectionBehavior(
-                NSWindowCollectionBehavior::IgnoresCycle | NSWindowCollectionBehavior::Transient,
-            );
-        }
-    }
+    apply_note_pin_state(&window, note.pinned)?;
 
     Ok(window)
 }
@@ -1032,7 +1042,7 @@ pub fn show_version_window(app: &AppHandle) -> Result<(), anyhow::Error> {
         VERSION_WINDOW_LABEL,
         tauri::WebviewUrl::App("index.html".into()),
     )
-    .title("Sticky Version")
+    .title("Sticky Update")
     .initialization_script(init_script)
     .inner_size(420.0, 300.0)
     .resizable(false)

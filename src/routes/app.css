@@ -112,6 +112,7 @@ button {
   background: rgba(255, 255, 255, 0.18);
   border: 1px solid rgba(0, 0, 0, 0.48);
   border-radius: 3px;
+  box-sizing: border-box;
   height: 13px;
   margin: 0;
   position: relative;
@@ -127,12 +128,15 @@ button {
 }
 
 .editor .tiptap ul[data-type="taskList"] input[type="checkbox"]:checked::after {
-  color: white;
-  content: "✓";
-  font: 700 10px/11px system-ui, sans-serif;
-  left: 2px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
+  content: "";
+  height: 6px;
+  left: 4px;
   position: absolute;
-  top: 0;
+  top: 1px;
+  transform: rotate(45deg);
+  width: 3px;
 }
 
 .editor .tiptap ul[data-type="taskList"] li > div {
