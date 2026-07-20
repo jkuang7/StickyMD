@@ -356,6 +356,31 @@ impl NoteRepository {
         })
     }
 
+    pub fn update_size_if_changed(
+        &self,
+        id: &str,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<bool> {
+        self.mutate_if_changed(|store| {
+            let note = store
+                .notes
+                .get_mut(id)
+                .with_context(|| format!("Unknown note id {id}"))?;
+            if note.collapsed {
+                return Ok(false);
+            }
+            let width = width.max(150);
+            let height = height.max(80);
+            let changed = note.expanded_width != width || note.expanded_height != height;
+            if changed {
+                note.expanded_width = width;
+                note.expanded_height = height;
+            }
+            Ok(changed)
+        })
+    }
+
     pub fn close(&self, id: &str) -> anyhow::Result<StoredNote> {
         let closed_at = current_time_millis()?;
         self.update(id, |note| {
@@ -925,6 +950,27 @@ mod tests {
                 reloaded.get(&first.id).unwrap().y
             ),
             (40, 50)
+        );
+        cleanup(dir);
+    }
+
+    #[test]
+    fn native_size_settlement_never_overwrites_durable_position() {
+        let dir = temp_dir("size-only-update");
+        let repository = NoteRepository::load_from_dir(&dir).unwrap();
+        let note = repository.all().unwrap()[0].clone();
+        repository
+            .set_positions(&[(note.id.clone(), 3019, 147)])
+            .unwrap();
+
+        assert!(repository
+            .update_size_if_changed(&note.id, 420, 360)
+            .unwrap());
+        let updated = repository.get(&note.id).unwrap();
+        assert_eq!((updated.x, updated.y), (3019, 147));
+        assert_eq!(
+            (updated.expanded_width, updated.expanded_height),
+            (420, 360)
         );
         cleanup(dir);
     }

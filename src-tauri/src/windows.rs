@@ -10,6 +10,7 @@ use tauri::{
 };
 use tauri_plugin_log::log;
 
+use crate::pinned_windows::sync_pinned_window_registry;
 use crate::save_load::{note_id_from_label, save_settings, NoteRepository, StoredNote};
 use crate::settings::{
     clamp_font_size, MenuSettings, FONT_SIZE_STEP, MAX_FONT_SIZE, MIN_FONT_SIZE,
@@ -46,7 +47,8 @@ pub fn apply_note_pin_state(window: &WebviewWindow, pinned: bool) -> anyhow::Res
         let mut collection_behavior =
             NSWindowCollectionBehavior::IgnoresCycle | NSWindowCollectionBehavior::Transient;
         if pinned {
-            collection_behavior |= NSWindowCollectionBehavior::CanJoinAllApplications;
+            collection_behavior |= NSWindowCollectionBehavior::CanJoinAllApplications
+                | NSWindowCollectionBehavior::CanJoinAllSpaces;
         }
 
         unsafe {
@@ -590,9 +592,22 @@ pub fn open_sticky(app: &AppHandle, note: &StoredNote) -> Result<WebviewWindow, 
         if matches!(event, WindowEvent::CloseRequested { .. }) {
             let _ = cycle_focus(&app_clone, false);
         }
+        if matches!(event, WindowEvent::Destroyed) {
+            if let Err(error) = sync_pinned_window_registry(&app_clone, Some(&note_id)) {
+                log::error!(
+                    "Could not remove destroyed note {note_id} from pinned-window registry: {error:#}"
+                );
+            }
+        }
     });
 
     apply_note_pin_state(&window, note.pinned)?;
+    if let Err(error) = sync_pinned_window_registry(app, None) {
+        log::error!(
+            "Could not register pin state for opened note {}: {error:#}",
+            note.id
+        );
+    }
 
     Ok(window)
 }

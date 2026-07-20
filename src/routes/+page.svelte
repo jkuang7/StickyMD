@@ -61,8 +61,9 @@
 
   async function toggleAlwaysOnTop() {
     await editor?.flushSave();
-    alwaysOnTop = !alwaysOnTop;
-    await invoke("set_note_always_on_top", { alwaysOnTop });
+    const next = !alwaysOnTop;
+    await invoke("set_note_always_on_top", { alwaysOnTop: next });
+    alwaysOnTop = next;
   }
 
   async function linkNotesOnThisSide() {
@@ -315,8 +316,12 @@
         void toggleAlwaysOnTop();
       }}
       aria-label={alwaysOnTop ? "unpin note" : "pin note"}
+      aria-pressed={alwaysOnTop}
+      title={alwaysOnTop
+        ? "Pinned above other apps and across workspaces"
+        : "Pin above other apps and across workspaces"}
     >
-      <Icon path={alwaysOnTop ? mdiPinOff : mdiPin} size={10} />
+      <Icon path={alwaysOnTop ? mdiPin : mdiPinOff} size={10} />
     </button>
     <button
       class="titlebar-button"

@@ -9,11 +9,10 @@ use crate::{
         resize_note_height as resize_native_note_height, run_window_drag, set_window_collapsed,
         settle_window_geometry, GroupRuntime,
     },
+    pinned_windows::sync_pinned_window_registry,
     save_load::{note_id_from_label, NoteRepository},
     settings::MenuSettings,
-    windows::{
-        apply_note_pin_state, change_note_font_size, create_sticky, sorted_windows, GeometryIndex,
-    },
+    windows::{apply_note_pin_state, change_note_font_size, create_sticky, sorted_windows},
 };
 
 const LEFT_MOUSE_BUTTON_MASK: usize = 1;
@@ -224,29 +223,12 @@ pub fn save_note(
     let group_runtime = window.state::<GroupRuntime>();
     let _operation = group_runtime.lock().map_err(|error| error.to_string())?;
     let id = note_id_from_label(window.label()).map_err(|error| error.to_string())?;
-    let geometry = window
-        .state::<GeometryIndex>()
-        .get(id)
-        .map_err(|error| error.to_string())?;
-    let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
-    let position = geometry.position.to_logical::<i32>(scale_factor);
-    let size = geometry.size.to_logical::<u32>(scale_factor);
-    let pinned = window
-        .is_always_on_top()
-        .map_err(|error| error.to_string())?;
     let repository = window.state::<NoteRepository>();
 
     repository
         .update(id, |note| {
             note.document = document;
             note.color = color;
-            note.x = position.x;
-            note.y = position.y;
-            note.pinned = pinned;
-            if !note.collapsed {
-                note.expanded_width = size.width.max(150);
-                note.expanded_height = size.height.max(80);
-            }
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -269,15 +251,34 @@ pub fn set_note_always_on_top(
     window: tauri::WebviewWindow,
     always_on_top: bool,
 ) -> Result<(), String> {
-    apply_note_pin_state(&window, always_on_top).map_err(|error| error.to_string())?;
     let id = note_id_from_label(window.label()).map_err(|error| error.to_string())?;
-    window
-        .state::<NoteRepository>()
-        .update(id, |note| {
-            note.pinned = always_on_top;
+    let repository = window.state::<NoteRepository>();
+    let previous = repository
+        .get(id)
+        .map_err(|error| error.to_string())?
+        .pinned;
+    apply_note_pin_state(&window, always_on_top).map_err(|error| error.to_string())?;
+    if let Err(error) = repository.update(id, |note| {
+        note.pinned = always_on_top;
+        Ok(())
+    }) {
+        let _ = apply_note_pin_state(&window, previous);
+        return Err(error.to_string());
+    }
+    if let Err(error) = sync_pinned_window_registry(window.app_handle(), None) {
+        let rollback = repository.update(id, |note| {
+            note.pinned = previous;
             Ok(())
-        })
-        .map_err(|error| error.to_string())?;
+        });
+        let native_rollback = apply_note_pin_state(&window, previous);
+        rollback.map_err(|rollback| {
+            format!("Could not roll back pin state after registry failure: {rollback:#}")
+        })?;
+        native_rollback.map_err(|rollback| {
+            format!("Could not roll back native pin state after registry failure: {rollback:#}")
+        })?;
+        return Err(error.to_string());
+    }
     window.set_focus().map_err(|error| error.to_string())
 }
 

@@ -21,6 +21,7 @@ const COLLAPSED_HEIGHT: u32 = 24;
 const GROUP_GAP: u32 = 12;
 const RESET_MARGIN: i32 = 20;
 const DRAG_DETACH_THRESHOLD: i32 = 4;
+const NATIVE_POSITION_ROUNDING_TOLERANCE: i32 = 2;
 
 #[derive(Default)]
 pub(crate) struct GroupRuntimeState {
@@ -239,8 +240,18 @@ fn requested_physical_position(
 #[derive(Debug, PartialEq, Eq)]
 enum PositionSettlement {
     AdoptProgrammatic(PhysicalPosition<i32>),
-    RestoreDurable,
+    ExternalMove,
     Unchanged,
+}
+
+fn positions_within_rounding_tolerance(
+    requested: PhysicalPosition<i32>,
+    observed: PhysicalPosition<i32>,
+) -> bool {
+    (requested.x - observed.x)
+        .abs()
+        .max((requested.y - observed.y).abs())
+        <= NATIVE_POSITION_ROUNDING_TOLERANCE
 }
 
 fn position_settlement(
@@ -250,10 +261,15 @@ fn position_settlement(
     durable: LogicalPosition<i32>,
     scale: f64,
 ) -> PositionSettlement {
-    if programmatic_positions.remove(id).is_some() {
-        PositionSettlement::AdoptProgrammatic(observed)
+    if let Some(requested) = programmatic_positions.get(id).copied() {
+        if positions_within_rounding_tolerance(requested, observed) {
+            programmatic_positions.remove(id);
+            PositionSettlement::AdoptProgrammatic(observed)
+        } else {
+            PositionSettlement::ExternalMove
+        }
     } else if observed.to_logical::<i32>(scale) != durable {
-        PositionSettlement::RestoreDurable
+        PositionSettlement::ExternalMove
     } else {
         PositionSettlement::Unchanged
     }
@@ -832,15 +848,6 @@ pub fn settle_window_geometry(window: &WebviewWindow) -> anyhow::Result<()> {
             )?;
             return Ok(());
         }
-    } else if group.is_none() {
-        repository.update_geometry_if_changed(
-            &id,
-            position.x,
-            position.y,
-            size.width,
-            size.height,
-        )?;
-        return Ok(());
     } else {
         match position_settlement(
             &mut runtime.programmatic_positions,
@@ -859,14 +866,20 @@ pub fn settle_window_geometry(window: &WebviewWindow) -> anyhow::Result<()> {
                 }
                 geometries.set_position(&id, observed)?;
             }
-            PositionSettlement::RestoreDurable => {
-                window.set_position(LogicalPosition::new(current.x, current.y))?;
-                let requested = LogicalPosition::new(current.x, current.y).to_physical(scale);
-                geometries.set_position(&id, requested)?;
-                runtime.record_programmatic_position(id.clone(), requested);
+            PositionSettlement::ExternalMove => {
+                if current.pinned {
+                    window.set_position(LogicalPosition::new(current.x, current.y))?;
+                    let requested = LogicalPosition::new(current.x, current.y).to_physical(scale);
+                    geometries.set_position(&id, requested)?;
+                    runtime.record_programmatic_position(id.clone(), requested);
+                }
             }
             PositionSettlement::Unchanged => {}
         }
+    }
+    if group.is_none() {
+        repository.update_size_if_changed(&id, size.width, size.height)?;
+        return Ok(());
     }
     let group = group.context("Note was no longer in a linked group")?;
     if current.collapsed
@@ -1295,6 +1308,24 @@ mod tests {
             PositionSettlement::AdoptProgrammatic(rounded_native_position)
         );
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn external_move_does_not_consume_the_pending_programmatic_target() {
+        let requested = PhysicalPosition::new(100, 200);
+        let mut pending = HashMap::from([("note".to_string(), requested)]);
+
+        assert_eq!(
+            position_settlement(
+                &mut pending,
+                "note",
+                PhysicalPosition::new(3439, 1354),
+                LogicalPosition::new(20, 20),
+                1.0,
+            ),
+            PositionSettlement::ExternalMove
+        );
+        assert_eq!(pending.get("note"), Some(&requested));
     }
 
     #[test]
