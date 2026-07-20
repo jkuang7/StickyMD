@@ -26,7 +26,7 @@ const BACKUP_FOLDER: &str = "backups";
 const NOTES_DATA: &str = "notes.json";
 const PREVIOUS_NOTES_DATA: &str = "notes.previous.json";
 const SETTINGS: &str = "settings";
-const STORAGE_VERSION: u32 = 2;
+const STORAGE_VERSION: u32 = 3;
 const ARCHIVE_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
 static TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -95,12 +95,18 @@ impl StoredNote {
     }
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct StoredGroup {
+    pub id: String,
+    pub note_ids: Vec<String>,
+}
+
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq)]
-struct NoteStore {
+pub(crate) struct NoteStore {
     version: u32,
-    notes: BTreeMap<String, StoredNote>,
-    #[serde(default, rename = "stacks", skip_serializing)]
-    _removed_stacks: Option<Value>,
+    pub(crate) notes: BTreeMap<String, StoredNote>,
+    #[serde(default)]
+    pub(crate) groups: BTreeMap<String, StoredGroup>,
     #[serde(default, rename = "linked_stack", skip_serializing)]
     _legacy_linked_stack: Option<Value>,
 }
@@ -110,7 +116,7 @@ impl NoteStore {
         Self {
             version: STORAGE_VERSION,
             notes: BTreeMap::new(),
-            _removed_stacks: None,
+            groups: BTreeMap::new(),
             _legacy_linked_stack: None,
         }
     }
@@ -135,7 +141,15 @@ impl NoteStore {
         let previous_count = self.notes.len();
         self.notes
             .retain(|_, note| note.closed_at.is_none_or(|closed_at| closed_at >= cutoff));
+        self.normalize_groups();
         previous_count - self.notes.len()
+    }
+
+    fn normalize_groups(&mut self) {
+        for group in self.groups.values_mut() {
+            group.note_ids.retain(|id| self.notes.contains_key(id));
+        }
+        self.groups.retain(|_, group| group.note_ids.len() >= 2);
     }
 }
 
@@ -229,6 +243,26 @@ impl NoteRepository {
             .with_context(|| format!("Unknown note id {id}"))
     }
 
+    pub fn group_for_note(&self, note_id: &str) -> anyhow::Result<Option<StoredGroup>> {
+        let store = self
+            .notes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Note storage lock poisoned"))?;
+        Ok(store
+            .groups
+            .values()
+            .find(|group| group.note_ids.iter().any(|id| id == note_id))
+            .cloned())
+    }
+
+    pub fn all_groups(&self) -> anyhow::Result<Vec<StoredGroup>> {
+        let store = self
+            .notes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Note storage lock poisoned"))?;
+        Ok(store.groups.values().cloned().collect())
+    }
+
     pub fn create_with_font_size(&self, font_size: u8) -> anyhow::Result<StoredNote> {
         self.create_at_with_font_size(0, 0, font_size)
     }
@@ -271,10 +305,12 @@ impl NoteRepository {
     pub fn delete(&self, id: &str) -> anyhow::Result<()> {
         self.mutate(|store| {
             store.notes.remove(id);
+            store.normalize_groups();
             Ok(())
         })
     }
 
+    #[cfg(test)]
     pub fn set_positions(&self, positions: &[(String, i32, i32)]) -> anyhow::Result<()> {
         self.mutate(|store| {
             for (id, x, y) in positions {
@@ -328,6 +364,7 @@ impl NoteRepository {
         })
     }
 
+    #[cfg(test)]
     pub fn restore_last_closed(&self) -> anyhow::Result<Option<StoredNote>> {
         let id = self
             .all()?
@@ -345,6 +382,7 @@ impl NoteRepository {
         .map(Some)
     }
 
+    #[cfg(test)]
     pub fn restore_all_closed(&self) -> anyhow::Result<usize> {
         let mut restored_count = 0;
         self.mutate(|store| {
@@ -358,7 +396,23 @@ impl NoteRepository {
         Ok(restored_count)
     }
 
-    fn mutate<F>(&self, update: F) -> anyhow::Result<()>
+    pub fn last_closed(&self) -> anyhow::Result<Option<StoredNote>> {
+        Ok(self
+            .all()?
+            .into_iter()
+            .filter(|note| note.closed_at.is_some())
+            .max_by_key(|note| note.closed_at))
+    }
+
+    pub fn archived(&self) -> anyhow::Result<Vec<StoredNote>> {
+        Ok(self
+            .all()?
+            .into_iter()
+            .filter(|note| note.closed_at.is_some())
+            .collect())
+    }
+
+    pub(crate) fn mutate<F>(&self, update: F) -> anyhow::Result<()>
     where
         F: FnOnce(&mut NoteStore) -> anyhow::Result<()>,
     {
@@ -388,7 +442,7 @@ impl NoteRepository {
     }
 }
 
-fn current_time_millis() -> anyhow::Result<u64> {
+pub(crate) fn current_time_millis() -> anyhow::Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("System time is before UNIX epoch")?
@@ -399,13 +453,19 @@ fn current_time_millis() -> anyhow::Result<u64> {
 
 fn parse_store(bytes: &[u8]) -> anyhow::Result<NoteStore> {
     let mut value: Value = serde_json::from_slice(bytes).context("Failed to parse note storage")?;
-    if value.get("version").and_then(Value::as_u64) == Some(1) {
+    let version = value.get("version").and_then(Value::as_u64);
+    if matches!(version, Some(1 | 2)) {
         let object = value
             .as_object_mut()
             .context("Note storage root was not an object")?;
         object.insert("version".into(), Value::from(STORAGE_VERSION));
+        if version == Some(2) {
+            let groups = object.remove("stacks").unwrap_or_else(|| json!({}));
+            object.insert("groups".into(), groups);
+        } else {
+            object.insert("groups".into(), json!({}));
+        }
         object.remove("linked_stack");
-        object.remove("stacks");
     }
     let store: NoteStore = serde_json::from_value(value).context("Failed to parse note storage")?;
     validate_store(&store)?;
@@ -430,6 +490,27 @@ fn validate_store(store: &NoteStore) -> anyhow::Result<()> {
         }
         if !(MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&note.font_size) {
             bail!("Note {} contained an invalid font size", note.id);
+        }
+    }
+    let mut memberships = std::collections::HashSet::new();
+    for (key, group) in &store.groups {
+        if key != &group.id {
+            bail!("Group map key did not match the stored group id");
+        }
+        if group.note_ids.len() < 2 {
+            bail!("Group {} contained fewer than two notes", group.id);
+        }
+        let mut local = std::collections::HashSet::new();
+        for note_id in &group.note_ids {
+            if !store.notes.contains_key(note_id) {
+                bail!("Group {} referenced missing note {note_id}", group.id);
+            }
+            if !local.insert(note_id) {
+                bail!("Group {} contained duplicate note {note_id}", group.id);
+            }
+            if !memberships.insert(note_id) {
+                bail!("Note {note_id} belonged to more than one group");
+            }
         }
     }
     Ok(())
@@ -962,6 +1043,136 @@ mod tests {
         assert_eq!(saved["version"], STORAGE_VERSION);
         assert!(saved.get("linked_stack").is_none());
         assert!(saved.get("stacks").is_none());
+        cleanup(dir);
+    }
+
+    #[test]
+    fn version_two_explicit_stacks_migrate_to_ordered_groups() {
+        let dir = temp_dir("group-v2-migration");
+        let first = StoredNote::new();
+        let second = StoredNote::new();
+        let notes = BTreeMap::from([
+            (first.id.clone(), first.clone()),
+            (second.id.clone(), second.clone()),
+        ]);
+        fs::write(
+            dir.join(NOTES_DATA),
+            serde_json::to_vec_pretty(&json!({
+                "version": 2,
+                "notes": notes,
+                "stacks": {
+                    "old-stack": {
+                        "id": "old-stack",
+                        "note_ids": [second.id.clone(), first.id.clone()]
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let repository = NoteRepository::load_from_dir(&dir).unwrap();
+        assert_eq!(
+            repository.all_groups().unwrap(),
+            vec![StoredGroup {
+                id: "old-stack".into(),
+                note_ids: vec![second.id, first.id],
+            }]
+        );
+        cleanup(dir);
+    }
+
+    #[test]
+    fn ordered_group_and_archived_member_slot_survive_restart() {
+        let dir = temp_dir("ordered-group-archive-slot");
+        let repository = NoteRepository::load_from_dir(&dir).unwrap();
+        let first = repository.all().unwrap()[0].clone();
+        let second = repository.create_with_font_size(DEFAULT_FONT_SIZE).unwrap();
+        let third = repository.create_with_font_size(DEFAULT_FONT_SIZE).unwrap();
+        let group = StoredGroup {
+            id: "group-a".into(),
+            note_ids: vec![second.id.clone(), first.id.clone(), third.id.clone()],
+        };
+        repository
+            .mutate(|store| {
+                store.groups.insert(group.id.clone(), group.clone());
+                store.notes.get_mut(&first.id).unwrap().closed_at =
+                    Some(current_time_millis().unwrap());
+                Ok(())
+            })
+            .unwrap();
+
+        let reloaded = NoteRepository::load_from_dir(&dir).unwrap();
+        assert_eq!(reloaded.all_groups().unwrap(), vec![group.clone()]);
+        assert_eq!(reloaded.group_for_note(&first.id).unwrap(), Some(group));
+        assert_eq!(reloaded.last_closed().unwrap().unwrap().id, first.id);
+        cleanup(dir);
+    }
+
+    #[test]
+    fn duplicate_group_membership_rejection_rolls_back_the_transaction() {
+        let dir = temp_dir("unique-group-membership");
+        let repository = NoteRepository::load_from_dir(&dir).unwrap();
+        let first = repository.all().unwrap()[0].clone();
+        let second = repository.create_with_font_size(DEFAULT_FONT_SIZE).unwrap();
+        let third = repository.create_with_font_size(DEFAULT_FONT_SIZE).unwrap();
+        repository
+            .mutate(|store| {
+                store.groups.insert(
+                    "one".into(),
+                    StoredGroup {
+                        id: "one".into(),
+                        note_ids: vec![first.id.clone(), second.id.clone()],
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(repository
+            .mutate(|store| {
+                store.notes.get_mut(&first.id).unwrap().x = 999;
+                store.groups.insert(
+                    "two".into(),
+                    StoredGroup {
+                        id: "two".into(),
+                        note_ids: vec![first.id.clone(), third.id.clone()],
+                    },
+                );
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(repository.get(&first.id).unwrap().x, first.x);
+        assert_eq!(repository.all_groups().unwrap().len(), 1);
+        cleanup(dir);
+    }
+
+    #[test]
+    fn deleting_a_member_dissolves_an_undersized_group() {
+        let dir = temp_dir("group-dissolution");
+        let repository = NoteRepository::load_from_dir(&dir).unwrap();
+        let first = repository.all().unwrap()[0].clone();
+        let second = repository.create_with_font_size(DEFAULT_FONT_SIZE).unwrap();
+        repository
+            .mutate(|store| {
+                store.groups.insert(
+                    "one".into(),
+                    StoredGroup {
+                        id: "one".into(),
+                        note_ids: vec![first.id.clone(), second.id.clone()],
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        repository.delete(&second.id).unwrap();
+        assert!(repository.all_groups().unwrap().is_empty());
+        assert!(NoteRepository::load_from_dir(&dir)
+            .unwrap()
+            .all_groups()
+            .unwrap()
+            .is_empty());
         cleanup(dir);
     }
 

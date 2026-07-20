@@ -31,9 +31,9 @@
       ],
     },
     {
-      title: "Navigate & arrange",
+      title: "Navigate & link",
       shortcuts: [
-        ["Arrange notes on this side below current note", "⇧ ⌘ L"],
+        ["Link notes on this side below current note", "⇧ ⌘ L"],
         ["Align with next note or screen edge", "⌥ ⌘ + Arrow"],
         ["Align with any nearby edge", "⇧ ⌥ ⌘ + Arrow"],
         ["Set color 1–7", "⌘ 1–7"],

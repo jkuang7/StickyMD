@@ -4,14 +4,35 @@ use serde_json::Value;
 use tauri::Manager;
 
 use crate::{
+    groups::{
+        close_window_and_archive, link_notes_on_this_side_below,
+        resize_note_height as resize_native_note_height, run_window_drag, set_window_collapsed,
+        settle_window_geometry, GroupRuntime,
+    },
     save_load::{note_id_from_label, NoteRepository},
     settings::MenuSettings,
     windows::{
-        apply_note_pin_state, arrange_notes_on_this_side_below, change_note_font_size,
-        close_window_and_archive, create_sticky, set_window_collapsed, sorted_windows,
-        GeometryIndex,
+        apply_note_pin_state, change_note_font_size, create_sticky, sorted_windows, GeometryIndex,
     },
 };
+
+const LEFT_MOUSE_BUTTON_MASK: usize = 1;
+
+fn left_mouse_button_is_pressed_in(mask: usize) -> bool {
+    mask & LEFT_MOUSE_BUTTON_MASK != 0
+}
+
+#[cfg(target_os = "macos")]
+fn left_mouse_button_is_pressed() -> bool {
+    use objc2_app_kit::NSEvent;
+
+    left_mouse_button_is_pressed_in(NSEvent::pressedMouseButtons())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn left_mouse_button_is_pressed() -> bool {
+    false
+}
 
 #[derive(Default)]
 enum QuitState {
@@ -100,60 +121,73 @@ pub fn bring_all_to_front(
 
 #[tauri::command]
 pub fn start_window_drag(window: tauri::WebviewWindow) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2::MainThreadMarker;
-        use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSWindow};
+    run_window_drag(&window, || {
+        #[cfg(target_os = "macos")]
+        {
+            use objc2::MainThreadMarker;
+            use objc2_app_kit::{
+                NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSWindow,
+            };
 
-        let Some(main_thread) = MainThreadMarker::new() else {
-            tauri_plugin_log::log::error!(
-                "Window drag command did not run on the macOS main thread"
-            );
-            return Err("Window drag must start on the macOS main thread".to_string());
-        };
-        let ns_window_ptr = window.ns_window().map_err(|error| error.to_string())?;
-        let ns_window = unsafe { &*(ns_window_ptr as *const NSWindow) };
-        let current_event = NSApplication::sharedApplication(main_thread)
-            .currentEvent()
-            .filter(|event| {
-                event.r#type() == NSEventType::LeftMouseDown
-                    && event.windowNumber() == ns_window.windowNumber()
-            });
-        let event = if let Some(event) = current_event {
-            event
-        } else {
-            let location = ns_window.convertPointFromScreen(NSEvent::mouseLocation());
-            NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-                NSEventType::LeftMouseDown,
-                location,
-                NSEventModifierFlags::empty(),
-                0.0,
-                ns_window.windowNumber(),
-                None,
-                0,
-                1,
-                1.0,
-            )
-            .ok_or_else(|| "Could not construct the macOS window drag event".to_string())?
-        };
+            let Some(main_thread) = MainThreadMarker::new() else {
+                tauri_plugin_log::log::error!(
+                    "Window drag command did not run on the macOS main thread"
+                );
+                return Err(anyhow::anyhow!(
+                    "Window drag must start on the macOS main thread"
+                ));
+            };
+            let ns_window_ptr = window.ns_window()?;
+            let ns_window = unsafe { &*(ns_window_ptr as *const NSWindow) };
+            let current_event = NSApplication::sharedApplication(main_thread)
+                .currentEvent()
+                .filter(|event| {
+                    event.r#type() == NSEventType::LeftMouseDown
+                        && event.windowNumber() == ns_window.windowNumber()
+                });
+            let event = if let Some(event) = current_event {
+                event
+            } else {
+                let location = ns_window.convertPointFromScreen(NSEvent::mouseLocation());
+                NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                    NSEventType::LeftMouseDown,
+                    location,
+                    NSEventModifierFlags::empty(),
+                    0.0,
+                    ns_window.windowNumber(),
+                    None,
+                    0,
+                    1,
+                    1.0,
+                )
+                .ok_or_else(|| anyhow::anyhow!("Could not construct the macOS window drag event"))?
+            };
 
-        ns_window.performWindowDragWithEvent(&event);
-        window.set_focus().map_err(|error| error.to_string())
-    }
+            ns_window.performWindowDragWithEvent(&event);
+            window.set_focus()?;
+        }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        window.start_dragging().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())
-    }
+        #[cfg(not(target_os = "macos"))]
+        {
+            window.start_dragging()?;
+            window.set_focus()?;
+        }
+        Ok(())
+    })
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub fn arrange_notes_on_this_side_below_current_note(
+pub fn link_notes_on_this_side_below_current_note(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    arrange_notes_on_this_side_below(&app, &window).map_err(|error| error.to_string())
+    link_notes_on_this_side_below(&app, &window).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn resize_note_height(window: tauri::WebviewWindow, height: u32) -> Result<(), String> {
+    resize_native_note_height(&window, height).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -187,6 +221,8 @@ pub fn save_note(
         return Err("Refusing to save a document whose root type is not 'doc'".into());
     }
 
+    let group_runtime = window.state::<GroupRuntime>();
+    let _operation = group_runtime.lock().map_err(|error| error.to_string())?;
     let id = note_id_from_label(window.label()).map_err(|error| error.to_string())?;
     let geometry = window
         .state::<GeometryIndex>()
@@ -219,19 +255,12 @@ pub fn save_note(
 }
 
 #[tauri::command]
-pub fn save_geometry(window: tauri::WebviewWindow) -> Result<(), String> {
-    let id = note_id_from_label(window.label()).map_err(|error| error.to_string())?;
-    let geometry = window
-        .state::<GeometryIndex>()
-        .get(id)
-        .map_err(|error| error.to_string())?;
-    let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
-    let position = geometry.position.to_logical::<i32>(scale_factor);
-    let size = geometry.size.to_logical::<u32>(scale_factor);
-    window
-        .state::<NoteRepository>()
-        .update_geometry_if_changed(id, position.x, position.y, size.width, size.height)
-        .map(|_| ())
+pub fn save_geometry(window: tauri::WebviewWindow) -> Result<bool, String> {
+    if left_mouse_button_is_pressed() {
+        return Ok(false);
+    }
+    settle_window_geometry(&window)
+        .map(|()| true)
         .map_err(|error| error.to_string())
 }
 
@@ -293,5 +322,13 @@ mod tests {
         let coordinator = QuitCoordinator::default();
         assert!(coordinator.begin(HashSet::new()).unwrap());
         assert!(coordinator.is_ready().unwrap());
+    }
+
+    #[test]
+    fn geometry_settlement_waits_only_for_the_left_mouse_button() {
+        assert!(left_mouse_button_is_pressed_in(0b0001));
+        assert!(left_mouse_button_is_pressed_in(0b0101));
+        assert!(!left_mouse_button_is_pressed_in(0));
+        assert!(!left_mouse_button_is_pressed_in(0b0010));
     }
 }

@@ -6,13 +6,15 @@ use tauri::{AppHandle, Manager, Wry};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_log::log;
 
+use crate::groups::{
+    link_notes_on_this_side_below_focused, reset_note_positions, unlink_group_for_focused,
+};
 use crate::save_load::save_settings;
 use crate::settings::MenuSettings;
 use crate::windows::{
-    arrange_notes_on_this_side_below_focused, change_focused_note_font_size, create_sticky,
-    cycle_focus, request_close_sticky, reset_note_positions, restore_all_notes,
-    restore_last_closed, set_color, show_version_window, snap_window, toggle_note_visibility,
-    toggle_shortcuts_window, Direction,
+    change_focused_note_font_size, create_sticky, cycle_focus, request_close_sticky,
+    restore_all_notes, restore_last_closed, set_color, show_version_window, snap_window,
+    toggle_note_visibility, toggle_shortcuts_window, Direction,
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
@@ -22,7 +24,8 @@ pub enum MenuCommand {
     ReopenClosedNote,
     RestoreAllNotes,
     ResetPositions,
-    ArrangeNotesOnThisSideBelowCurrent,
+    LinkNotesOnThisSideBelowCurrent,
+    UnlinkThisGroup,
     ToggleNoteVisibility,
     NextNote,
     PrevNote,
@@ -97,10 +100,17 @@ fn create_window_submenu(app: &AppHandle) -> Result<Submenu<Wry>, anyhow::Error>
             )?,
             &MenuItem::with_id(
                 app,
-                MenuCommand::ArrangeNotesOnThisSideBelowCurrent,
-                "Arrange Notes on This Side Below Current Note",
+                MenuCommand::LinkNotesOnThisSideBelowCurrent,
+                "Link Notes on This Side Below Current Note",
                 true,
                 Some("Cmd+Shift+L"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                MenuCommand::UnlinkThisGroup,
+                "Unlink This Group",
+                true,
+                None::<&str>,
             )?,
         ])
         .separator()
@@ -294,9 +304,10 @@ pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
             if let Err(e) = match command {
                 MenuCommand::NewNote => create_sticky(app).map(|_| ()),
                 MenuCommand::ResetPositions => reset_note_positions(app),
-                MenuCommand::ArrangeNotesOnThisSideBelowCurrent => {
-                    arrange_notes_on_this_side_below_focused(app)
+                MenuCommand::LinkNotesOnThisSideBelowCurrent => {
+                    link_notes_on_this_side_below_focused(app)
                 }
+                MenuCommand::UnlinkThisGroup => unlink_group_for_focused(app),
                 MenuCommand::Snap(direction) => snap_window(app, direction, false),
                 MenuCommand::PartialSnap(direction) => snap_window(app, direction, true),
                 MenuCommand::CloseNote => request_close_sticky(app),

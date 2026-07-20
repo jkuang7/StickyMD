@@ -17,7 +17,6 @@ use crate::settings::{
 use crate::updater::installed_build_sha;
 
 const GAP: i32 = 20;
-const ARRANGEMENT_GAP: i32 = 12;
 const COLLAPSED_HEIGHT: u32 = 24;
 const DEFAULT_NOTE_HEIGHT: u32 = 250;
 const DEFAULT_NOTE_WIDTH: u32 = 300;
@@ -60,7 +59,7 @@ pub fn apply_note_pin_state(window: &WebviewWindow, pinned: bool) -> anyhow::Res
 }
 
 impl GeometryIndex {
-    fn insert(&self, id: String, geometry: NoteGeometry) -> anyhow::Result<()> {
+    pub(crate) fn insert(&self, id: String, geometry: NoteGeometry) -> anyhow::Result<()> {
         self.0
             .lock()
             .map_err(|_| anyhow::anyhow!("Geometry index lock poisoned"))?
@@ -77,7 +76,11 @@ impl GeometryIndex {
             .with_context(|| format!("No live geometry for note {id}"))
     }
 
-    fn set_position(&self, id: &str, position: PhysicalPosition<i32>) -> anyhow::Result<()> {
+    pub(crate) fn set_position(
+        &self,
+        id: &str,
+        position: PhysicalPosition<i32>,
+    ) -> anyhow::Result<()> {
         let mut geometries = self
             .0
             .lock()
@@ -89,7 +92,7 @@ impl GeometryIndex {
         Ok(())
     }
 
-    fn set_size(&self, id: &str, size: PhysicalSize<u32>) -> anyhow::Result<()> {
+    pub(crate) fn set_size(&self, id: &str, size: PhysicalSize<u32>) -> anyhow::Result<()> {
         let mut geometries = self
             .0
             .lock()
@@ -117,119 +120,6 @@ impl GeometryIndex {
     }
 }
 
-fn arrangement_order(
-    anchor_id: &str,
-    active_ids: &[String],
-    geometries: &GeometryIndex,
-    monitor: WindowRect,
-    work_area: WindowRect,
-) -> anyhow::Result<Vec<String>> {
-    if !active_ids.iter().any(|id| id == anchor_id) {
-        bail!("Selected anchor was not an active note");
-    }
-
-    let anchor_geometry = geometries.get(anchor_id)?;
-    let anchor_center = WindowRect::from_geometry(anchor_geometry).center_twice();
-    if !monitor.contains_center_twice(anchor_center) {
-        bail!("Selected anchor center was outside its current monitor");
-    }
-    let midpoint_twice = 2 * work_area.x + work_area.width;
-    let anchor_is_left = anchor_center.0 < midpoint_twice;
-
-    let mut children = active_ids
-        .iter()
-        .filter(|id| id.as_str() != anchor_id)
-        .map(|id| Ok((id.clone(), geometries.get(id)?)))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    children.retain(|(_, geometry)| {
-        let center = WindowRect::from_geometry(*geometry).center_twice();
-        monitor.contains_center_twice(center) && (center.0 < midpoint_twice) == anchor_is_left
-    });
-    children.sort_by(|a, b| {
-        let a_position = a.1.position;
-        let b_position = b.1.position;
-        (a_position.y, a_position.x, &a.0).cmp(&(b_position.y, b_position.x, &b.0))
-    });
-
-    let mut order = Vec::with_capacity(children.len() + 1);
-    order.push(anchor_id.to_string());
-    order.extend(children.into_iter().map(|(id, _)| id));
-    Ok(order)
-}
-
-fn arranged_positions(
-    origin: PhysicalPosition<i32>,
-    heights: &[u32],
-    gap: u32,
-) -> anyhow::Result<Vec<PhysicalPosition<i32>>> {
-    let mut y = i64::from(origin.y);
-    heights
-        .iter()
-        .enumerate()
-        .map(|(index, height)| {
-            let position = PhysicalPosition::new(
-                origin.x,
-                i32::try_from(y).context("Arranged note position exceeded platform limits")?,
-            );
-            if index + 1 < heights.len() {
-                y = y
-                    .checked_add(i64::from(*height) + i64::from(gap))
-                    .context("Arranged note layout height overflowed")?;
-            }
-            Ok(position)
-        })
-        .collect()
-}
-
-fn reset_positions_in_work_area(
-    work_area: WindowRect,
-    count: usize,
-    preferred_step: i32,
-    header_height: i32,
-    margin: i32,
-) -> anyhow::Result<Vec<PhysicalPosition<i32>>> {
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-
-    let margin = i64::from(margin.max(0));
-    let header_height = i64::from(header_height.max(1));
-    let x = work_area.x + margin.min(work_area.width.saturating_sub(1).max(0));
-    let top = work_area.y + margin.min(work_area.height.saturating_sub(1).max(0));
-    let bottom = (work_area.bottom() - header_height - margin).max(top);
-    let available = bottom - top;
-    let step = if count == 1 {
-        0
-    } else {
-        i64::from(preferred_step.max(0)).min(available / (count as i64 - 1))
-    };
-
-    (0..count)
-        .map(|index| {
-            Ok(PhysicalPosition::new(
-                i32::try_from(x).context("Reset note x-position exceeded platform limits")?,
-                i32::try_from(top + index as i64 * step)
-                    .context("Reset note y-position exceeded platform limits")?,
-            ))
-        })
-        .collect()
-}
-
-fn physical_arrangement_gap(window: &WebviewWindow) -> anyhow::Result<u32> {
-    let gap = f64::from(ARRANGEMENT_GAP) * window.scale_factor()?;
-    if !gap.is_finite() || gap > f64::from(u32::MAX) {
-        bail!("Note scale produced an invalid arrangement gap");
-    }
-    Ok(gap.round() as u32)
-}
-
-struct WindowSnapshot {
-    id: String,
-    window: WebviewWindow,
-    position: PhysicalPosition<i32>,
-    size: PhysicalSize<u32>,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct WindowRect {
     x: i64,
@@ -248,24 +138,12 @@ impl WindowRect {
         }
     }
 
-    fn from_geometry(geometry: NoteGeometry) -> Self {
-        Self::from_physical(geometry.position, geometry.size)
-    }
-
     fn right(self) -> i64 {
         self.x + self.width
     }
 
     fn bottom(self) -> i64 {
         self.y + self.height
-    }
-
-    fn center_twice(self) -> (i64, i64) {
-        (2 * self.x + self.width, 2 * self.y + self.height)
-    }
-
-    fn contains_center_twice(self, (x, y): (i64, i64)) -> bool {
-        2 * self.x <= x && x < 2 * self.right() && 2 * self.y <= y && y < 2 * self.bottom()
     }
 
     fn contains(self, other: Self) -> bool {
@@ -387,144 +265,6 @@ fn get_position_and_size(
         .outer_size()
         .context(format!("Could not get size of window: {}", window.label()))?;
     Ok((window_position, window_size))
-}
-
-fn restore_positions(snapshots: &[WindowSnapshot], geometries: &GeometryIndex) {
-    for snapshot in snapshots {
-        if let Err(error) = snapshot.window.set_position(snapshot.position) {
-            log::error!(
-                "Could not restore note {} after positioning failure: {error}",
-                snapshot.window.label()
-            );
-        }
-        if let Err(error) = geometries.insert(
-            snapshot.id.clone(),
-            NoteGeometry {
-                position: snapshot.position,
-                size: snapshot.size,
-            },
-        ) {
-            log::error!(
-                "Could not restore cached geometry for note {}: {error:#}",
-                snapshot.id
-            );
-        }
-    }
-}
-
-fn move_snapshots(
-    snapshots: &[WindowSnapshot],
-    targets: &[PhysicalPosition<i32>],
-    geometries: &GeometryIndex,
-) -> anyhow::Result<()> {
-    if snapshots.len() != targets.len() {
-        bail!("Note target count did not match the open note count");
-    }
-    for (index, (snapshot, target)) in snapshots.iter().zip(targets).enumerate() {
-        if let Err(error) = snapshot.window.set_position(*target) {
-            restore_positions(&snapshots[..index], geometries);
-            return Err(error)
-                .with_context(|| format!("Could not position note {}", snapshot.window.label()));
-        }
-        if let Err(error) = geometries.set_position(&snapshot.id, *target) {
-            restore_positions(&snapshots[..=index], geometries);
-            return Err(error)
-                .with_context(|| format!("Could not cache position for note {}", snapshot.id));
-        }
-    }
-    Ok(())
-}
-
-pub fn arrange_notes_on_this_side_below(
-    app: &AppHandle,
-    anchor: &WebviewWindow,
-) -> anyhow::Result<()> {
-    open_missing_active_notes(app)?;
-    let repository = app.state::<NoteRepository>();
-    let geometries = app.state::<GeometryIndex>();
-    let windows: HashMap<_, _> = app.webview_windows().into_iter().collect();
-    let anchor_id = note_id_from_label(anchor.label())?;
-    let active_ids: Vec<_> = repository
-        .active()?
-        .into_iter()
-        .map(|note| note.id)
-        .collect();
-    let monitor = anchor
-        .current_monitor()?
-        .context("Selected note did not have a current monitor")?;
-    let monitor_rect = WindowRect::from_physical(*monitor.position(), *monitor.size());
-    let work_area =
-        WindowRect::from_physical(monitor.work_area().position, monitor.work_area().size);
-    let order = arrangement_order(anchor_id, &active_ids, &geometries, monitor_rect, work_area)?;
-
-    let mut snapshots = Vec::new();
-    for id in &order {
-        let window = windows
-            .get(&format!("sticky_{id}"))
-            .with_context(|| format!("Active note {id} did not have an open window"))?;
-        let geometry = geometries.get(id)?;
-        snapshots.push(WindowSnapshot {
-            id: id.clone(),
-            position: geometry.position,
-            size: geometry.size,
-            window: window.clone(),
-        });
-    }
-    let anchor_origin = snapshots
-        .first()
-        .context("Selected anchor did not have an open window")?
-        .position;
-    let heights: Vec<_> = snapshots
-        .iter()
-        .map(|snapshot| snapshot.size.height)
-        .collect();
-    let targets = arranged_positions(
-        anchor_origin,
-        &heights,
-        physical_arrangement_gap(&snapshots[0].window)?,
-    )?;
-
-    let arrangement_result = (|| -> anyhow::Result<()> {
-        for (index, (snapshot, target)) in snapshots.iter().zip(&targets).enumerate().skip(1) {
-            if let Err(error) = snapshot.window.set_position(*target) {
-                restore_positions(&snapshots[1..index], &geometries);
-                return Err(error).with_context(|| {
-                    format!("Could not arrange note {}", snapshot.window.label())
-                });
-            }
-            if let Err(error) = geometries.set_position(&snapshot.id, *target) {
-                restore_positions(&snapshots[1..=index], &geometries);
-                return Err(error)
-                    .with_context(|| format!("Could not cache arranged note {}", snapshot.id));
-            }
-        }
-
-        let positions = snapshots
-            .iter()
-            .zip(&targets)
-            .map(|(snapshot, target)| {
-                let logical = target.to_logical::<i32>(snapshot.window.scale_factor()?);
-                Ok((
-                    note_id_from_label(snapshot.window.label())?.to_string(),
-                    logical.x,
-                    logical.y,
-                ))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        repository
-            .set_positions(&positions)
-            .context("Could not persist arranged note positions")
-    })();
-    if let Err(error) = arrangement_result {
-        restore_positions(&snapshots[1..], &geometries);
-        return Err(error);
-    }
-    Ok(())
-}
-
-pub fn arrange_notes_on_this_side_below_focused(app: &AppHandle) -> anyhow::Result<()> {
-    let anchor = get_focused_window(app).context("No note currently focused")?;
-    arrange_notes_on_this_side_below(app, &anchor)
 }
 
 fn window_overlap(start_1: i32, len_1: i32, start_2: i32, len_2: i32) -> bool {
@@ -777,7 +517,7 @@ pub fn focus_existing_or_create(app: &AppHandle) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-fn open_missing_active_notes(app: &AppHandle) -> anyhow::Result<()> {
+pub(crate) fn open_missing_active_notes(app: &AppHandle) -> anyhow::Result<()> {
     let windows = app.webview_windows();
     for note in app.state::<NoteRepository>().active()? {
         if !windows.contains_key(&format!("sticky_{}", note.id)) {
@@ -876,7 +616,9 @@ pub fn request_close_sticky(app: &AppHandle) -> Result<(), anyhow::Error> {
     }
 }
 
-pub fn close_window_and_archive(window: &WebviewWindow) -> Result<(), anyhow::Error> {
+pub(crate) fn close_ungrouped_window_and_archive(
+    window: &WebviewWindow,
+) -> Result<(), anyhow::Error> {
     let id = note_id_from_label(window.label())?.to_string();
     let repository = window.state::<NoteRepository>();
     let previous_closed_at = repository.get(&id)?.closed_at;
@@ -896,41 +638,17 @@ pub fn close_window_and_archive(window: &WebviewWindow) -> Result<(), anyhow::Er
 }
 
 pub fn restore_last_closed(app: &AppHandle) -> Result<(), anyhow::Error> {
-    let repository = app.state::<NoteRepository>();
-    let note = repository
-        .restore_last_closed()?
-        .context("No recently closed note")?;
-    match open_sticky(app, &note) {
-        Ok(window) => window.set_focus().context("Could not focus restored note"),
-        Err(open_error) => {
-            repository.close(&note.id).with_context(|| {
-                format!("Could not roll back failed restore after: {open_error:#}")
-            })?;
-            Err(open_error.context("Could not reopen the last closed note"))
-        }
-    }
+    crate::groups::restore_last_closed(app)
 }
 
 pub fn restore_all_notes(app: &AppHandle) -> Result<(), anyhow::Error> {
-    app.state::<NoteRepository>().restore_all_closed()?;
-    open_missing_active_notes(app)?;
-
-    let windows = sorted_windows(app);
-    if windows.is_empty() {
-        bail!("No notes to restore");
-    }
-    for window in &windows {
-        window.show()?;
-        if window.is_minimized()? {
-            window.unminimize()?;
-        }
-    }
-    windows[0]
-        .set_focus()
-        .context("Could not focus a restored note")
+    crate::groups::restore_all_notes(app)
 }
 
-pub fn set_window_collapsed(window: &WebviewWindow, collapsed: bool) -> Result<(), anyhow::Error> {
+pub(crate) fn set_ungrouped_window_collapsed(
+    window: &WebviewWindow,
+    collapsed: bool,
+) -> Result<(), anyhow::Error> {
     let id = note_id_from_label(window.label())?;
     let repository = window.state::<NoteRepository>();
     let geometries = window.state::<GeometryIndex>();
@@ -1187,199 +905,4 @@ pub fn change_note_font_size(
 pub fn change_focused_note_font_size(app: &AppHandle, increase: bool) -> Result<(), anyhow::Error> {
     let window = get_focused_window(app).context("No note currently focused")?;
     change_note_font_size(app, &window, increase)
-}
-
-pub fn reset_note_positions(app: &AppHandle) -> anyhow::Result<()> {
-    open_missing_active_notes(app)?;
-    let geometries = app.state::<GeometryIndex>();
-    let snapshots = sorted_windows(app)
-        .into_iter()
-        .map(|window| {
-            let id = note_id_from_label(window.label())?.to_string();
-            let geometry = geometries.get(&id)?;
-            Ok(WindowSnapshot {
-                id,
-                position: geometry.position,
-                size: geometry.size,
-                window,
-            })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    if snapshots.is_empty() {
-        return Ok(());
-    }
-
-    let monitor = app
-        .primary_monitor()?
-        .context("No primary monitor available for resetting note positions")?;
-    let scale_factor = monitor.scale_factor();
-    let work_area =
-        WindowRect::from_physical(monitor.work_area().position, monitor.work_area().size);
-    let step = (f64::from(COLLAPSED_HEIGHT + ARRANGEMENT_GAP as u32) * scale_factor).round() as i32;
-    let header_height = (f64::from(COLLAPSED_HEIGHT) * scale_factor).round() as i32;
-    let margin = (f64::from(GAP) * scale_factor).round() as i32;
-    let targets =
-        reset_positions_in_work_area(work_area, snapshots.len(), step, header_height, margin)?;
-
-    for snapshot in &snapshots {
-        snapshot.window.show()?;
-        if snapshot.window.is_minimized()? {
-            snapshot.window.unminimize()?;
-        }
-    }
-    let reset_result = (|| -> anyhow::Result<()> {
-        move_snapshots(&snapshots, &targets, &geometries)?;
-        let positions = snapshots
-            .iter()
-            .zip(&targets)
-            .map(|(snapshot, target)| {
-                let logical = target.to_logical::<i32>(scale_factor);
-                Ok((
-                    note_id_from_label(snapshot.window.label())?.to_string(),
-                    logical.x,
-                    logical.y,
-                ))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        app.state::<NoteRepository>()
-            .set_positions(&positions)
-            .context("Could not persist reset note positions")
-    })();
-    if let Err(error) = reset_result {
-        restore_positions(&snapshots, &geometries);
-        return Err(error);
-    }
-
-    snapshots[0]
-        .window
-        .set_focus()
-        .context("Could not focus reset notes")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn geometry(x: i32, y: i32, width: u32, height: u32) -> NoteGeometry {
-        NoteGeometry {
-            position: PhysicalPosition::new(x, y),
-            size: PhysicalSize::new(width, height),
-        }
-    }
-
-    #[test]
-    fn arrangement_selects_and_orders_only_notes_on_the_anchors_monitor_half() {
-        let geometries = GeometryIndex::default();
-        for (id, note_geometry) in [
-            ("left-anchor", geometry(100, 100, 100, 100)),
-            ("left-top-right", geometry(300, 20, 100, 100)),
-            ("left-bottom", geometry(200, 80, 100, 100)),
-            ("left-top-left", geometry(100, 20, 100, 100)),
-            ("midpoint", geometry(450, 10, 100, 100)),
-            ("right-anchor", geometry(700, 100, 100, 100)),
-            ("other-monitor", geometry(1100, 0, 100, 100)),
-        ] {
-            geometries.insert(id.into(), note_geometry).unwrap();
-        }
-        let active_ids = [
-            "left-anchor",
-            "left-top-right",
-            "left-bottom",
-            "left-top-left",
-            "midpoint",
-            "right-anchor",
-            "other-monitor",
-        ]
-        .map(str::to_string);
-        let monitor = WindowRect {
-            x: 0,
-            y: 0,
-            width: 1000,
-            height: 800,
-        };
-        let work_area = WindowRect {
-            x: 0,
-            y: 24,
-            width: 1000,
-            height: 776,
-        };
-
-        assert_eq!(
-            arrangement_order("left-anchor", &active_ids, &geometries, monitor, work_area).unwrap(),
-            vec![
-                "left-anchor",
-                "left-top-left",
-                "left-top-right",
-                "left-bottom"
-            ]
-        );
-        assert_eq!(
-            arrangement_order("right-anchor", &active_ids, &geometries, monitor, work_area)
-                .unwrap(),
-            vec!["right-anchor", "midpoint"]
-        );
-    }
-
-    #[test]
-    fn moved_event_changes_the_side_used_by_an_immediate_arrangement() {
-        let geometries = GeometryIndex::default();
-        geometries
-            .insert("anchor".into(), geometry(100, 100, 100, 100))
-            .unwrap();
-        geometries
-            .insert("moved".into(), geometry(700, 20, 100, 100))
-            .unwrap();
-        let active_ids = ["anchor".to_string(), "moved".to_string()];
-        let monitor = WindowRect {
-            x: 0,
-            y: 0,
-            width: 1000,
-            height: 800,
-        };
-
-        geometries
-            .record_window_event("moved", &WindowEvent::Moved(PhysicalPosition::new(200, 20)))
-            .unwrap();
-
-        assert_eq!(
-            arrangement_order("anchor", &active_ids, &geometries, monitor, monitor).unwrap(),
-            vec!["anchor", "moved"]
-        );
-    }
-
-    #[test]
-    fn arranged_positions_preserve_anchor_origin_and_use_actual_heights() {
-        let positions = arranged_positions(
-            PhysicalPosition::new(40, 20),
-            &[250, COLLAPSED_HEIGHT, 180],
-            ARRANGEMENT_GAP as u32,
-        )
-        .unwrap();
-
-        assert_eq!(
-            positions,
-            vec![
-                PhysicalPosition::new(40, 20),
-                PhysicalPosition::new(40, 282),
-                PhysicalPosition::new(40, 318),
-            ]
-        );
-    }
-
-    #[test]
-    fn reset_positions_keep_every_note_header_in_the_work_area() {
-        let work_area = WindowRect {
-            x: -1200,
-            y: 24,
-            width: 900,
-            height: 100,
-        };
-        let positions = reset_positions_in_work_area(work_area, 4, 36, 24, 20).unwrap();
-
-        assert_eq!(positions[0], PhysicalPosition::new(-1180, 44));
-        assert_eq!(positions[3], PhysicalPosition::new(-1180, 80));
-        assert!(positions.iter().all(|position| {
-            i64::from(position.y) >= work_area.y && i64::from(position.y) + 24 <= work_area.bottom()
-        }));
-    }
 }

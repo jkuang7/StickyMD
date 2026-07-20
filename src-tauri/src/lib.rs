@@ -5,6 +5,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_log::log::{self, LevelFilter};
 
 use crate::commands::*;
+use crate::groups::{restore_group_layouts, GroupRuntime};
 use crate::menu::{create_menu, handle_menu_event};
 use crate::save_load::{load_settings, load_stickies, NoteRepository};
 use crate::settings::MenuSettings;
@@ -12,6 +13,7 @@ use crate::updater::{check_for_update, launch_update};
 use crate::windows::{focus_existing_or_create, GeometryIndex, NoteVisibility};
 
 mod commands;
+mod groups;
 mod menu;
 mod save_load;
 mod settings;
@@ -31,6 +33,7 @@ fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     app.set_menu(menu)?;
     app.on_menu_event(handle_menu_event);
     load_stickies(app.handle())?;
+    restore_group_layouts(app.handle())?;
 
     Ok(())
 }
@@ -101,7 +104,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             bring_all_to_front,
             start_window_drag,
-            arrange_notes_on_this_side_below_current_note,
+            link_notes_on_this_side_below_current_note,
+            resize_note_height,
             change_font_size,
             create_note,
             save_note,
@@ -115,6 +119,7 @@ pub fn run() {
         ])
         .manage(QuitCoordinator::default())
         .manage(GeometryIndex::default())
+        .manage(GroupRuntime::default())
         .manage(NoteVisibility::default())
         .setup(setup)
         .build(tauri::generate_context!())

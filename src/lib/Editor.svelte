@@ -1,9 +1,7 @@
 <script lang="ts">
   import { Editor, type JSONContent } from "@tiptap/core";
-  import { LogicalSize } from "@tauri-apps/api/dpi";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { webviewWindow } from "@tauri-apps/api";
   import { onDestroy, onMount } from "svelte";
 
   import { createEditorExtensions } from "./editorExtensions";
@@ -17,8 +15,6 @@
     onTitleChange?: (title: string) => void;
     fontSize?: number;
   } = $props();
-
-  const appWindow = webviewWindow.getCurrentWebviewWindow();
 
   let element: HTMLDivElement;
   let editor: Editor | undefined;
@@ -69,7 +65,7 @@
 
   async function resizeWindow(targetHeight: number) {
     if (Math.abs(targetHeight - currentWindowHeight()) <= 1) return;
-    await appWindow.setSize(new LogicalSize(element.clientWidth, targetHeight));
+    await invoke("resize_note_height", { height: Math.round(targetHeight) });
   }
 
   export async function resizeForFontSize(

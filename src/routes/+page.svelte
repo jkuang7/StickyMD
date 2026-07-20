@@ -1,7 +1,7 @@
 <script lang="ts">
   import {
-    mdiAlignVerticalDistribute,
     mdiClose,
+    mdiLinkVariant,
     mdiPalette,
     mdiPin,
     mdiPinOff,
@@ -50,10 +50,14 @@
     | undefined;
   let fontResizeFrame: number | undefined;
   let fontResizeRevision = 0;
-  let arrangementBusy = $state(false);
+  let linkBusy = $state(false);
   let noteTitle = $state("Empty Note");
   let moveTimer: number | undefined;
+  let geometrySettleRevision = 0;
   const unlisteners: Array<() => void> = [];
+
+  const geometryDebounceMs = 150;
+  const mouseReleasePollMs = 50;
 
   async function toggleAlwaysOnTop() {
     await editor?.flushSave();
@@ -61,14 +65,14 @@
     await invoke("set_note_always_on_top", { alwaysOnTop });
   }
 
-  async function arrangeNotesOnThisSide() {
-    if (arrangementBusy) return;
-    arrangementBusy = true;
+  async function linkNotesOnThisSide() {
+    if (linkBusy) return;
+    linkBusy = true;
     try {
       await editor?.flushSave();
-      await invoke("arrange_notes_on_this_side_below_current_note");
+      await invoke("link_notes_on_this_side_below_current_note");
     } finally {
-      arrangementBusy = false;
+      linkBusy = false;
     }
   }
 
@@ -112,12 +116,42 @@
     await editor?.flushSave();
   }
 
-  function saveGeometryDebounced() {
+  function cancelGeometrySettlement() {
+    geometrySettleRevision += 1;
     if (moveTimer !== undefined) window.clearTimeout(moveTimer);
+    moveTimer = undefined;
+  }
+
+  function scheduleGeometrySettlement(delay: number) {
+    cancelGeometrySettlement();
+    const revision = geometrySettleRevision;
     moveTimer = window.setTimeout(() => {
       moveTimer = undefined;
-      void invoke("save_geometry");
-    }, 150);
+      void settleGeometryAfterMouseRelease(revision);
+    }, delay);
+  }
+
+  async function settleGeometryAfterMouseRelease(revision: number) {
+    const settled = await invoke<boolean>("save_geometry");
+    if (!settled && revision === geometrySettleRevision) {
+      moveTimer = window.setTimeout(() => {
+        moveTimer = undefined;
+        void settleGeometryAfterMouseRelease(revision);
+      }, mouseReleasePollMs);
+    }
+  }
+
+  function saveGeometryDebounced() {
+    scheduleGeometrySettlement(geometryDebounceMs);
+  }
+
+  async function startWindowDrag() {
+    cancelGeometrySettlement();
+    try {
+      await invoke("start_window_drag");
+    } finally {
+      saveGeometryDebounced();
+    }
   }
 
   function createNoteWithControlN(event: KeyboardEvent) {
@@ -250,7 +284,7 @@
       if (event.button === 0 && event.detail === 1) {
         event.preventDefault();
         event.stopImmediatePropagation();
-        void invoke("start_window_drag");
+        void startWindowDrag();
       }
     }}
     ondblclick={toggleCollapsed}
@@ -286,15 +320,15 @@
     </button>
     <button
       class="titlebar-button"
-      disabled={arrangementBusy}
+      disabled={linkBusy}
       onclick={(event) => {
         event.stopPropagation();
-        void arrangeNotesOnThisSide();
+        void linkNotesOnThisSide();
       }}
-      aria-label="Arrange notes on this side below this note."
-      title="Arrange notes on this side below this note."
+      aria-label="Link notes on this side below this note."
+      title="Link independent notes on this side; drag a linked note to detach it."
     >
-      <Icon path={mdiAlignVerticalDistribute} size={11} />
+      <Icon path={mdiLinkVariant} size={12} />
     </button>
     <button
       class="titlebar-button"
