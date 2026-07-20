@@ -9,9 +9,10 @@ use tauri_plugin_log::log;
 use crate::save_load::save_settings;
 use crate::settings::MenuSettings;
 use crate::windows::{
-    arrange_notes_on_this_side_below_focused, create_sticky, cycle_focus, request_close_sticky,
-    reset_note_positions, restore_all_notes, restore_last_closed, set_color, show_version_window,
-    snap_window, toggle_note_visibility, toggle_shortcuts_window, Direction,
+    arrange_notes_on_this_side_below_focused, change_focused_note_font_size, create_sticky,
+    cycle_focus, request_close_sticky, reset_note_positions, restore_all_notes,
+    restore_last_closed, set_color, show_version_window, snap_window, toggle_note_visibility,
+    toggle_shortcuts_window, Direction,
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
@@ -25,6 +26,8 @@ pub enum MenuCommand {
     ToggleNoteVisibility,
     NextNote,
     PrevNote,
+    IncreaseFontSize,
+    DecreaseFontSize,
     Color(u8),
     Snap(Direction),
     PartialSnap(Direction),
@@ -215,6 +218,28 @@ fn create_edit_submenu(app: &AppHandle) -> Result<Submenu<Wry>, anyhow::Error> {
     Ok(menu)
 }
 
+fn create_view_submenu(app: &AppHandle) -> Result<Submenu<Wry>, anyhow::Error> {
+    SubmenuBuilder::new(app, "View")
+        .items(&[
+            &MenuItem::with_id(
+                app,
+                MenuCommand::IncreaseFontSize,
+                "Increase Font Size",
+                true,
+                Some("Cmd++"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                MenuCommand::DecreaseFontSize,
+                "Decrease Font Size",
+                true,
+                Some("Cmd+-"),
+            )?,
+        ])
+        .build()
+        .map_err(Into::into)
+}
+
 fn create_color_menu(app: &AppHandle) -> Result<Submenu<Wry>, anyhow::Error> {
     let menu = SubmenuBuilder::new(app, "Color")
         .items(&[
@@ -252,6 +277,7 @@ pub fn create_menu(app: &AppHandle) -> Result<Menu<Wry>, anyhow::Error> {
         .items(&[
             &create_window_submenu(app)?,
             &create_edit_submenu(app)?,
+            &create_view_submenu(app)?,
             &create_snap_submenu(app)?,
             &create_partial_snap_submenu(app)?,
             &create_color_menu(app)?,
@@ -279,6 +305,8 @@ pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
                 MenuCommand::ToggleNoteVisibility => toggle_note_visibility(app),
                 MenuCommand::NextNote => cycle_focus(app, false),
                 MenuCommand::PrevNote => cycle_focus(app, true),
+                MenuCommand::IncreaseFontSize => change_focused_note_font_size(app, true),
+                MenuCommand::DecreaseFontSize => change_focused_note_font_size(app, false),
                 MenuCommand::Color(index) => set_color(app, index),
                 MenuCommand::BringToFront => save_settings(app),
                 MenuCommand::AutoStart => apply_autostart_preference(app),

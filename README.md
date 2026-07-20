@@ -4,22 +4,31 @@ A local Markdown sticky-note app for Apple Silicon Macs. The installed app is na
 
 https://github.com/user-attachments/assets/7b61d4fa-8e2a-4b80-af09-37120dd7e8cb
 
-## Install
+Already have Sticky? [Update it from inside the app.](#update-an-existing-installation)
 
-Open **Terminal**, paste this entire command, and press **Return**:
+## First-time installation
+
+Open **Terminal**, paste this entire command, and press **Return** once:
 
 ```sh
 /bin/bash -c "$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/jkuang7/StickyMD/main/scripts/bootstrap-macos.sh)"
 ```
 
-That command handles everything and opens Sticky when it is done. The first installation can take several minutes. If your Mac asks to install developer tools, click **Install**, wait for it to finish, then return to Terminal and press **Return**.
+That command handles everything and opens Sticky when it is done. The first installation can take several minutes.
 
-## Update
+<details>
+<summary>If macOS asks to install developer tools</summary>
+
+Click **Install** and wait for macOS to finish. Terminal will continue automatically.
+
+</details>
+
+## Update an existing installation
 
 1. Open **Sticky**.
 2. In the menu bar at the top of the screen, click **Help**, then **Update**.
 3. If you see **Update available**, click **Update**.
-4. Leave the Terminal window open while Sticky updates. Sticky will close and reopen when it is done.
+4. Leave the Terminal window open while Sticky updates. No input is needed there; Sticky will close and reopen when it is done.
 
 If you see **Up to date**, you already have the latest version. Your notes stay safe during an update.
 

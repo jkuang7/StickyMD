@@ -10,7 +10,10 @@ use tauri::{
 };
 use tauri_plugin_log::log;
 
-use crate::save_load::{note_id_from_label, NoteRepository, StoredNote};
+use crate::save_load::{note_id_from_label, save_settings, NoteRepository, StoredNote};
+use crate::settings::{
+    clamp_font_size, MenuSettings, FONT_SIZE_STEP, MAX_FONT_SIZE, MIN_FONT_SIZE,
+};
 use crate::updater::installed_build_sha;
 
 const GAP: i32 = 20;
@@ -738,9 +741,12 @@ pub fn create_sticky(app: &AppHandle) -> Result<WebviewWindow, anyhow::Error> {
         })
         .transpose()?;
     let repository = app.state::<NoteRepository>();
+    let default_font_size = app.state::<MenuSettings>().default_font_size()?;
     let note = match position {
-        Some(position) => repository.create_at(position.x, position.y)?,
-        None => repository.create()?,
+        Some(position) => {
+            repository.create_at_with_font_size(position.x, position.y, default_font_size)?
+        }
+        None => repository.create_with_font_size(default_font_size)?,
     };
     match open_sticky(app, &note) {
         Ok(window) => Ok(window),
@@ -792,6 +798,7 @@ pub fn open_sticky(app: &AppHandle, note: &StoredNote) -> Result<WebviewWindow, 
         color: &'a str,
         collapsed: bool,
         always_on_top: bool,
+        font_size: u8,
     }
 
     let init = StickyInit {
@@ -800,6 +807,7 @@ pub fn open_sticky(app: &AppHandle, note: &StoredNote) -> Result<WebviewWindow, 
         color: &note.color,
         collapsed: note.collapsed,
         always_on_top: note.pinned,
+        font_size: note.font_size,
     };
     let init_script = format!("window.__STICKY_INIT__ = {}", serde_json::to_string(&init)?);
 
@@ -1121,6 +1129,55 @@ pub fn set_color(app: &AppHandle, index: u8) -> Result<(), anyhow::Error> {
             }
         });
 
+    Ok(())
+}
+
+pub fn change_focused_note_font_size(app: &AppHandle, increase: bool) -> Result<(), anyhow::Error> {
+    let window = get_focused_window(app).context("No note currently focused")?;
+    let id = note_id_from_label(window.label())?;
+    let repository = app.state::<NoteRepository>();
+    let current = repository.get(id)?;
+    let delta = if increase {
+        i64::from(FONT_SIZE_STEP)
+    } else {
+        -i64::from(FONT_SIZE_STEP)
+    };
+    let font_size = clamp_font_size(i64::from(current.font_size) + delta);
+    debug_assert!((MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&font_size));
+
+    let settings = app.state::<MenuSettings>();
+    let previous_default = settings.set_default_font_size(font_size)?;
+    if let Err(save_error) = save_settings(app) {
+        settings.set_default_font_size(previous_default)?;
+        let rollback_error = save_settings(app).err();
+        if let Some(rollback_error) = rollback_error {
+            bail!(
+                "Could not save the font-size default ({save_error:#}) or restore it ({rollback_error:#})"
+            );
+        }
+        return Err(save_error.context("Could not save the font-size default"));
+    }
+
+    if font_size != current.font_size {
+        if let Err(note_error) = repository.update(id, |note| {
+            note.font_size = font_size;
+            Ok(())
+        }) {
+            settings.set_default_font_size(previous_default)?;
+            if let Err(rollback_error) = save_settings(app) {
+                bail!(
+                    "Could not save note font size ({note_error:#}) or restore its default ({rollback_error:#})"
+                );
+            }
+            return Err(note_error.context("Could not save note font size"));
+        }
+    }
+
+    window.emit_to(
+        EventTarget::webview_window(window.label()),
+        "set_font_size",
+        font_size,
+    )?;
     Ok(())
 }
 

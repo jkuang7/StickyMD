@@ -74,7 +74,7 @@
   <section aria-live="polite">
     {#if installationStarted}
       <h2>Installation started</h2>
-      <p>Follow the progress in Terminal. Sticky will quit and reopen when the update finishes.</p>
+      <p>No input is needed in Terminal. Keep it open; Sticky will quit and reopen when the update finishes.</p>
     {:else if checkState === "checking"}
       <h2>Checking for updates…</h2>
       <p>Comparing this build with GitHub main.</p>

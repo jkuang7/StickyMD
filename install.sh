@@ -8,6 +8,8 @@ NODE_DIR="$TOOLS_DIR/node"
 NODE_LTS_MAJOR="24"
 export CARGO_HOME="$TOOLS_DIR/cargo"
 export RUSTUP_HOME="$TOOLS_DIR/rustup"
+FRONTEND_DEPENDENCY_STATE="$TOOLS_DIR/frontend-dependencies.sha256"
+APPLE_TOOLS_WAIT_SECONDS=3600
 
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sticky-install.XXXXXX")"
 cleanup() {
@@ -25,6 +27,18 @@ fail() {
   exit 1
 }
 
+wait_for_apple_tools() {
+  local elapsed=0
+
+  while ! /usr/bin/xcrun --find clang >/dev/null 2>&1; do
+    if (( elapsed >= APPLE_TOOLS_WAIT_SECONDS )); then
+      fail "Apple's Command Line Tools did not finish installing."
+    fi
+    /bin/sleep 5
+    elapsed=$((elapsed + 5))
+  done
+}
+
 ensure_apple_tools() {
   if /usr/bin/xcrun --find clang >/dev/null 2>&1; then
     return
@@ -33,11 +47,8 @@ ensure_apple_tools() {
   printf 'Apple needs to install its free Command Line Tools before Sticky can be built.\n'
   printf 'A macOS installation window should appear now.\n'
   /usr/bin/xcode-select --install >/dev/null 2>&1 || true
-  printf 'Click Install in that window and wait for it to finish.\n'
-  read -r -p 'When the installation is finished, return here and press Return: '
-
-  /usr/bin/xcrun --find clang >/dev/null 2>&1 || \
-    fail "Apple's Command Line Tools are still unavailable."
+  printf 'Click Install in that window. Sticky will continue automatically when it finishes.\n'
+  wait_for_apple_tools
 }
 
 install_node() {
@@ -96,6 +107,36 @@ install_rust() {
   fi
 }
 
+frontend_dependency_fingerprint() {
+  {
+    /usr/bin/shasum -a 256 "$ROOT_DIR/package.json" "$ROOT_DIR/package-lock.json" | \
+      /usr/bin/awk '{ print $1 }'
+    node --version
+    npm --version
+  } | /usr/bin/shasum -a 256 | /usr/bin/awk '{ print $1 }'
+}
+
+install_frontend_dependencies() {
+  local current_fingerprint installed_fingerprint=""
+
+  current_fingerprint="$(frontend_dependency_fingerprint)"
+  if [[ -f "$FRONTEND_DEPENDENCY_STATE" ]]; then
+    installed_fingerprint="$(<"$FRONTEND_DEPENDENCY_STATE")"
+  fi
+
+  if [[ -d "$ROOT_DIR/node_modules" && \
+        "$installed_fingerprint" == "$current_fingerprint" ]]; then
+    printf 'Ready: project dependencies are unchanged.\n'
+    return
+  fi
+
+  /bin/rm -f "$FRONTEND_DEPENDENCY_STATE"
+  npm ci
+  printf '%s\n' "$current_fingerprint" > "$TEMP_DIR/frontend-dependencies.sha256"
+  /bin/mkdir -p "$TOOLS_DIR"
+  /bin/mv "$TEMP_DIR/frontend-dependencies.sha256" "$FRONTEND_DEPENDENCY_STATE"
+}
+
 step "Checking this Mac"
 [[ "$(/usr/bin/uname -s)" == "Darwin" ]] || fail "This installer only supports macOS."
 [[ "$(/usr/bin/uname -m)" == "arm64" ]] || fail "This installer only supports Apple Silicon Macs."
@@ -112,9 +153,12 @@ step "Preparing Rust"
 install_rust
 printf 'Ready: %s\n' "$(rustc --version)"
 
-step "Downloading Sticky's project dependencies"
+step "Preparing Sticky's project dependencies"
 cd "$ROOT_DIR"
-npm ci
+install_frontend_dependencies
 
 step "Building and installing Sticky"
-npm run install:macos
+if ! npm run install:macos; then
+  /bin/rm -f "$FRONTEND_DEPENDENCY_STATE"
+  exit 1
+fi

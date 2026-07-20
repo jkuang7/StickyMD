@@ -13,8 +13,9 @@
     color: string;
   }
 
-  let { onTitleChange = () => undefined }: {
+  let { onTitleChange = () => undefined, fontSize = 16 }: {
     onTitleChange?: (title: string) => void;
+    fontSize?: number;
   } = $props();
 
   const appWindow = webviewWindow.getCurrentWebviewWindow();
@@ -38,7 +39,7 @@
       .find(Boolean) ?? "Empty Note";
   }
 
-  async function growToFit() {
+  export async function growToFit() {
     const editable = element.querySelector<HTMLElement>(".tiptap");
     if (!editable) return;
 
@@ -117,7 +118,6 @@
       onUpdate: () => {
         onTitleChange(currentTitle());
         queueSave();
-        void growToFit();
       },
     });
 
@@ -146,7 +146,11 @@
   });
 </script>
 
-<div class="editor" bind:this={element}></div>
+<div
+  class="editor"
+  bind:this={element}
+  style:--note-font-size={`${fontSize}px`}
+></div>
 
 <style>
   .editor {

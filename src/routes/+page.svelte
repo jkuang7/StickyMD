@@ -18,6 +18,7 @@
   interface StickyInit {
     always_on_top?: boolean;
     collapsed?: boolean;
+    font_size?: number;
   }
 
   const colors = [
@@ -42,6 +43,8 @@
   let titlebarHovered = $state(false);
   let alwaysOnTop = $state(false);
   let collapsed = $state(false);
+  let fontSize = $state(16);
+  let growAfterExpandBaseline: number | undefined;
   let arrangementBusy = $state(false);
   let noteTitle = $state("Empty Note");
   let moveTimer: number | undefined;
@@ -75,7 +78,15 @@
     await invoke("set_collapsed", { collapsed: next });
     collapsed = next;
     colorMenuOpen = false;
-    if (!collapsed) requestAnimationFrame(() => editor?.focus());
+    if (!collapsed) {
+      requestAnimationFrame(() => {
+        editor?.focus();
+        if (growAfterExpandBaseline !== undefined) {
+          growAfterExpandBaseline = undefined;
+          void editor?.growToFit();
+        }
+      });
+    }
   }
 
   function toggleColorMenu() {
@@ -116,6 +127,7 @@
       .__STICKY_INIT__;
     alwaysOnTop = init?.always_on_top ?? false;
     collapsed = init?.collapsed ?? false;
+    fontSize = init?.font_size ?? 16;
 
     if (!init) document.body.classList.add("focused");
     window.addEventListener("keydown", createNoteWithControlN, true);
@@ -134,6 +146,23 @@
       }),
       await appWindow.listen<number>("set_color", async (event) => {
         await setColor(colors[event.payload]);
+      }),
+      await appWindow.listen<number>("set_font_size", (event) => {
+        const previousFontSize = fontSize;
+        const increased = event.payload > fontSize;
+        fontSize = event.payload;
+        if (collapsed) {
+          if (increased) {
+            growAfterExpandBaseline ??= previousFontSize;
+          } else if (
+            growAfterExpandBaseline !== undefined &&
+            fontSize <= growAfterExpandBaseline
+          ) {
+            growAfterExpandBaseline = undefined;
+          }
+        } else if (increased) {
+          requestAnimationFrame(() => void editor?.growToFit());
+        }
       }),
       await appWindow.listen("close_note_request", () => closeNote()),
       await appWindow.listen("tauri://move", saveGeometryDebounced),
@@ -233,7 +262,11 @@
   </div>
 
   <main class:collapsed>
-    <Editor bind:this={editor} onTitleChange={(title) => (noteTitle = title)} />
+    <Editor
+      bind:this={editor}
+      {fontSize}
+      onTitleChange={(title) => (noteTitle = title)}
+    />
   </main>
 {/if}
 

@@ -17,13 +17,16 @@ use tauri_plugin_log::log;
 use tauri_plugin_store::StoreExt;
 use uuid::Uuid;
 
-use crate::{settings::MenuSettings, windows::open_sticky};
+use crate::{
+    settings::{clamp_font_size, MenuSettings, DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE},
+    windows::open_sticky,
+};
 
 const BACKUP_FOLDER: &str = "backups";
 const NOTES_DATA: &str = "notes.json";
 const PREVIOUS_NOTES_DATA: &str = "notes.previous.json";
 const SETTINGS: &str = "settings";
-const STORAGE_VERSION: u32 = 1;
+const STORAGE_VERSION: u32 = 2;
 const ARCHIVE_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
 static TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -38,6 +41,8 @@ pub struct StoredNote {
     pub expanded_width: u32,
     pub collapsed: bool,
     pub pinned: bool,
+    #[serde(default = "default_font_size")]
+    pub font_size: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<u64>,
 }
@@ -54,6 +59,7 @@ impl StoredNote {
             expanded_width: 300,
             collapsed: false,
             pinned: false,
+            font_size: DEFAULT_FONT_SIZE,
             closed_at: None,
         }
     }
@@ -93,6 +99,8 @@ impl StoredNote {
 struct NoteStore {
     version: u32,
     notes: BTreeMap<String, StoredNote>,
+    #[serde(default, rename = "stacks", skip_serializing)]
+    _removed_stacks: Option<Value>,
     #[serde(default, rename = "linked_stack", skip_serializing)]
     _legacy_linked_stack: Option<Value>,
 }
@@ -102,6 +110,7 @@ impl NoteStore {
         Self {
             version: STORAGE_VERSION,
             notes: BTreeMap::new(),
+            _removed_stacks: None,
             _legacy_linked_stack: None,
         }
     }
@@ -132,6 +141,10 @@ impl NoteStore {
 
 fn empty_document() -> Value {
     json!({ "type": "doc", "content": [{ "type": "paragraph" }] })
+}
+
+fn default_font_size() -> u8 {
+    DEFAULT_FONT_SIZE
 }
 
 pub struct NoteRepository {
@@ -216,14 +229,20 @@ impl NoteRepository {
             .with_context(|| format!("Unknown note id {id}"))
     }
 
-    pub fn create(&self) -> anyhow::Result<StoredNote> {
-        self.create_at(0, 0)
+    pub fn create_with_font_size(&self, font_size: u8) -> anyhow::Result<StoredNote> {
+        self.create_at_with_font_size(0, 0, font_size)
     }
 
-    pub fn create_at(&self, x: i32, y: i32) -> anyhow::Result<StoredNote> {
+    pub fn create_at_with_font_size(
+        &self,
+        x: i32,
+        y: i32,
+        font_size: u8,
+    ) -> anyhow::Result<StoredNote> {
         let mut note = StoredNote::new();
         note.x = x;
         note.y = y;
+        note.font_size = clamp_font_size(i64::from(font_size));
         let result = note.clone();
         self.mutate(|store| {
             store.notes.insert(note.id.clone(), note);
@@ -379,7 +398,16 @@ fn current_time_millis() -> anyhow::Result<u64> {
 }
 
 fn parse_store(bytes: &[u8]) -> anyhow::Result<NoteStore> {
-    let store: NoteStore = serde_json::from_slice(bytes).context("Failed to parse note storage")?;
+    let mut value: Value = serde_json::from_slice(bytes).context("Failed to parse note storage")?;
+    if value.get("version").and_then(Value::as_u64) == Some(1) {
+        let object = value
+            .as_object_mut()
+            .context("Note storage root was not an object")?;
+        object.insert("version".into(), Value::from(STORAGE_VERSION));
+        object.remove("linked_stack");
+        object.remove("stacks");
+    }
+    let store: NoteStore = serde_json::from_value(value).context("Failed to parse note storage")?;
     validate_store(&store)?;
     Ok(store)
 }
@@ -399,6 +427,9 @@ fn validate_store(store: &NoteStore) -> anyhow::Result<()> {
         }
         if note.document.get("type").and_then(Value::as_str) != Some("doc") {
             bail!("Note {} did not contain a Tiptap document", note.id);
+        }
+        if !(MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&note.font_size) {
+            bail!("Note {} contained an invalid font size", note.id);
         }
     }
     Ok(())
@@ -587,8 +618,13 @@ pub fn load_settings(app: &AppHandle) -> anyhow::Result<MenuSettings> {
         .get("autostart")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
+    let default_font_size = store
+        .get("default_font_size")
+        .and_then(|value| value.as_i64())
+        .map(clamp_font_size)
+        .unwrap_or(DEFAULT_FONT_SIZE);
 
-    MenuSettings::new(app, bring_to_front, autostart)
+    MenuSettings::new(app, bring_to_front, autostart, default_font_size)
 }
 
 pub fn save_settings(app: &AppHandle) -> anyhow::Result<()> {
@@ -598,6 +634,7 @@ pub fn save_settings(app: &AppHandle) -> anyhow::Result<()> {
     let settings = app.state::<MenuSettings>();
     store.set("bring_to_front", settings.bring_to_front()?);
     store.set("autostart", settings.autostart()?);
+    store.set("default_font_size", settings.default_font_size()?);
     store.save()?;
     Ok(())
 }
@@ -691,7 +728,7 @@ mod tests {
         let dir = temp_dir("restore-last-closed");
         let repository = NoteRepository::load_from_dir(&dir).unwrap();
         let first = repository.all().unwrap()[0].clone();
-        let second = repository.create().unwrap();
+        let second = repository.create_with_font_size(DEFAULT_FONT_SIZE).unwrap();
         repository
             .update(&first.id, |note| {
                 note.closed_at = Some(1);
@@ -718,8 +755,8 @@ mod tests {
         let dir = temp_dir("archive-retention-and-restore-all");
         let repository = NoteRepository::load_from_dir(&dir).unwrap();
         let active = repository.all().unwrap()[0].clone();
-        let recent = repository.create().unwrap();
-        let expired = repository.create().unwrap();
+        let recent = repository.create_with_font_size(DEFAULT_FONT_SIZE).unwrap();
+        let expired = repository.create_with_font_size(DEFAULT_FONT_SIZE).unwrap();
         let now = current_time_millis().unwrap();
         repository
             .update(&recent.id, |note| {
@@ -756,7 +793,7 @@ mod tests {
         let dir = temp_dir("position-update");
         let repository = NoteRepository::load_from_dir(&dir).unwrap();
         let first = repository.all().unwrap()[0].clone();
-        let second = repository.create().unwrap();
+        let second = repository.create_with_font_size(DEFAULT_FONT_SIZE).unwrap();
 
         repository
             .set_positions(&[(first.id.clone(), 40, 50), (second.id.clone(), 40, 312)])
@@ -812,12 +849,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_linked_stack_is_ignored_and_removed_by_the_next_save() {
-        let dir = temp_dir("legacy-linked-stack");
+    fn removed_stack_metadata_is_ignored_and_removed_by_the_next_save() {
+        let dir = temp_dir("removed-stack-metadata");
         let archived_at = current_time_millis().unwrap();
         let legacy_store = json!({
             "version": STORAGE_VERSION,
             "linked_stack": ["b", "a"],
+            "stacks": {
+                "old-stack": { "id": "old-stack", "note_ids": ["a", "b"] }
+            },
             "notes": {
                 "a": {
                     "id": "a",
@@ -881,7 +921,66 @@ mod tests {
         let saved: Value =
             serde_json::from_slice(&fs::read(dir.join(NOTES_DATA)).unwrap()).unwrap();
         assert!(saved.get("linked_stack").is_none());
+        assert!(saved.get("stacks").is_none());
+        assert_eq!(saved["notes"]["a"]["font_size"], DEFAULT_FONT_SIZE);
         assert_eq!(repository.get("b").unwrap().document, document("beta"));
+        cleanup(dir);
+    }
+
+    #[test]
+    fn version_one_store_migrates_to_font_size_schema() {
+        let dir = temp_dir("font-size-v1-migration");
+        let note = StoredNote::new();
+        let mut legacy_note = serde_json::to_value(&note).unwrap();
+        legacy_note.as_object_mut().unwrap().remove("font_size");
+        let mut notes = BTreeMap::new();
+        notes.insert(note.id.clone(), legacy_note);
+        fs::write(
+            dir.join(NOTES_DATA),
+            serde_json::to_vec_pretty(&json!({
+                "version": 1,
+                "linked_stack": [note.id.clone()],
+                "notes": notes
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let repository = NoteRepository::load_from_dir(&dir).unwrap();
+        assert_eq!(
+            repository.get(&note.id).unwrap().font_size,
+            DEFAULT_FONT_SIZE
+        );
+        repository
+            .update(&note.id, |note| {
+                note.color = "#81b7dd".into();
+                Ok(())
+            })
+            .unwrap();
+        let saved: Value =
+            serde_json::from_slice(&fs::read(dir.join(NOTES_DATA)).unwrap()).unwrap();
+        assert_eq!(saved["version"], STORAGE_VERSION);
+        assert!(saved.get("linked_stack").is_none());
+        assert!(saved.get("stacks").is_none());
+        cleanup(dir);
+    }
+
+    #[test]
+    fn note_font_sizes_remain_individual_after_restart() {
+        let dir = temp_dir("individual-font-sizes");
+        let repository = NoteRepository::load_from_dir(&dir).unwrap();
+        let first = repository.all().unwrap()[0].clone();
+        repository
+            .update(&first.id, |note| {
+                note.font_size = 22;
+                Ok(())
+            })
+            .unwrap();
+        let second = repository.create_with_font_size(28).unwrap();
+
+        let reloaded = NoteRepository::load_from_dir(&dir).unwrap();
+        assert_eq!(reloaded.get(&first.id).unwrap().font_size, 22);
+        assert_eq!(reloaded.get(&second.id).unwrap().font_size, 28);
         cleanup(dir);
     }
 
@@ -901,7 +1000,9 @@ mod tests {
     fn concurrent_saves_to_different_notes_do_not_drop_updates() {
         let dir = temp_dir("concurrent");
         let repository = Arc::new(NoteRepository::load_from_dir(&dir).unwrap());
-        let notes: Vec<_> = (0..12).map(|_| repository.create().unwrap()).collect();
+        let notes: Vec<_> = (0..12)
+            .map(|_| repository.create_with_font_size(DEFAULT_FONT_SIZE).unwrap())
+            .collect();
         let handles: Vec<_> = notes
             .iter()
             .enumerate()

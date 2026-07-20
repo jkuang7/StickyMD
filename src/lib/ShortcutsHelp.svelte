@@ -19,6 +19,8 @@
     {
       title: "Editor",
       shortcuts: [
+        ["Increase font size", "⌘ +"],
+        ["Decrease font size", "⌘ -"],
         ["Bullet list", "⇧ ⌘ 0"],
         ["Checklist", "⇧ ⌘ 9"],
         ["Check or uncheck task", "⇧ ⌘ C"],

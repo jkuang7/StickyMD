@@ -22,7 +22,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-for command in codesign ditto npm open osascript pgrep; do
+for command in cargo codesign ditto npm open osascript pgrep; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "Missing required command: $command" >&2
     exit 1
@@ -44,8 +44,13 @@ rollback() {
 }
 trap rollback EXIT
 
-echo "Building and checking Sticky..."
-npm run package:macos
+if [[ ! -d node_modules ]]; then
+  echo "Frontend dependencies are missing. Run: ./install.sh" >&2
+  exit 1
+fi
+
+echo "Building Sticky..."
+npm run app:build
 
 if [[ ! -d "$SOURCE_APP" ]]; then
   echo "Build completed without producing $SOURCE_APP" >&2

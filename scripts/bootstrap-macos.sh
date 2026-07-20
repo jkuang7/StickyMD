@@ -4,10 +4,23 @@ set -euo pipefail
 
 REPOSITORY="https://github.com/jkuang7/StickyMD.git"
 INSTALL_DIR="$HOME/StickyMD"
+APPLE_TOOLS_WAIT_SECONDS=3600
 
 fail() {
   printf '\nSticky was not installed: %s\n' "$1" >&2
   exit 1
+}
+
+wait_for_apple_tools() {
+  local elapsed=0
+
+  while ! /usr/bin/xcrun --find clang >/dev/null 2>&1; do
+    if (( elapsed >= APPLE_TOOLS_WAIT_SECONDS )); then
+      fail "Apple's developer tools did not finish installing. Complete their installation, then run this command again."
+    fi
+    /bin/sleep 5
+    elapsed=$((elapsed + 5))
+  done
 }
 
 [[ "$(/usr/bin/uname -s)" == "Darwin" ]] || fail "this installer only supports macOS."
@@ -16,12 +29,10 @@ fail() {
 if ! /usr/bin/xcrun --find clang >/dev/null 2>&1; then
   printf "Your Mac needs Apple's free developer tools.\n"
   /usr/bin/xcode-select --install >/dev/null 2>&1 || true
-  printf 'Click Install in the window that appears and wait for it to finish.\n'
-  read -r -p 'Then return here and press Return: '
+  printf 'Click Install in the window that appears. Sticky will continue automatically when it finishes.\n'
+  wait_for_apple_tools
 fi
 
-/usr/bin/xcrun --find clang >/dev/null 2>&1 || \
-  fail "Apple's developer tools are still unavailable. Run this command again after they finish installing."
 command -v git >/dev/null 2>&1 || fail "Git is still unavailable. Restart Terminal and run this command again."
 
 if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
