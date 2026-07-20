@@ -102,6 +102,7 @@ pub fn run() {
             bring_all_to_front,
             start_window_drag,
             arrange_notes_on_this_side_below_current_note,
+            change_font_size,
             create_note,
             save_note,
             save_geometry,

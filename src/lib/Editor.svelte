@@ -25,6 +25,8 @@
   let saveTimeout: number | undefined;
   let saveChain: Promise<void> = Promise.resolve();
   const unlisteners: UnlistenFn[] = [];
+  const minimumWindowHeight = 80;
+  const titlebarHeight = 24;
 
   function currentTitle(): string {
     if (!editor) return "Empty Note";
@@ -39,19 +41,56 @@
       .find(Boolean) ?? "Empty Note";
   }
 
-  export async function growToFit() {
+  function intrinsicContentHeight(editable: HTMLElement): number {
+    const previousHeight = editable.style.height;
+    const previousMinHeight = editable.style.minHeight;
+    const previousOverflowY = editable.style.overflowY;
+
+    editable.style.height = "auto";
+    editable.style.minHeight = "0";
+    editable.style.overflowY = "hidden";
+    const height = editable.scrollHeight;
+    editable.style.height = previousHeight;
+    editable.style.minHeight = previousMinHeight;
+    editable.style.overflowY = previousOverflowY;
+
+    return height;
+  }
+
+  export function currentWindowHeight(): number {
+    return element.clientHeight + titlebarHeight;
+  }
+
+  export function currentContentHeight(): number | undefined {
     const editable = element.querySelector<HTMLElement>(".tiptap");
-    if (!editable) return;
+    if (!editable) return undefined;
+    return intrinsicContentHeight(editable);
+  }
 
-    const factor = await appWindow.scaleFactor();
-    const windowSize = (await appWindow.innerSize()).toLogical(factor);
-    const requiredHeight = editable.scrollHeight + 24;
+  async function resizeWindow(targetHeight: number) {
+    if (Math.abs(targetHeight - currentWindowHeight()) <= 1) return;
+    await appWindow.setSize(new LogicalSize(element.clientWidth, targetHeight));
+  }
 
-    if (requiredHeight > windowSize.height) {
-      await appWindow.setSize(
-        new LogicalSize(windowSize.width, requiredHeight),
-      );
-    }
+  export async function resizeForFontSize(
+    baselineWindowHeight: number,
+    baselineContentHeight: number,
+  ) {
+    const contentHeight = currentContentHeight();
+    if (contentHeight === undefined) return;
+    const targetHeight = Math.max(
+      minimumWindowHeight,
+      baselineWindowHeight + contentHeight - baselineContentHeight,
+    );
+    await resizeWindow(targetHeight);
+  }
+
+  export async function growToFit() {
+    const contentHeight = currentContentHeight();
+    if (contentHeight === undefined) return;
+    await resizeWindow(
+      Math.max(currentWindowHeight(), contentHeight + titlebarHeight),
+    );
   }
 
   function queueSave(delay = 2_000) {

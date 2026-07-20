@@ -1132,8 +1132,11 @@ pub fn set_color(app: &AppHandle, index: u8) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-pub fn change_focused_note_font_size(app: &AppHandle, increase: bool) -> Result<(), anyhow::Error> {
-    let window = get_focused_window(app).context("No note currently focused")?;
+pub fn change_note_font_size(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    increase: bool,
+) -> Result<(), anyhow::Error> {
     let id = note_id_from_label(window.label())?;
     let repository = app.state::<NoteRepository>();
     let current = repository.get(id)?;
@@ -1179,6 +1182,11 @@ pub fn change_focused_note_font_size(app: &AppHandle, increase: bool) -> Result<
         font_size,
     )?;
     Ok(())
+}
+
+pub fn change_focused_note_font_size(app: &AppHandle, increase: bool) -> Result<(), anyhow::Error> {
+    let window = get_focused_window(app).context("No note currently focused")?;
+    change_note_font_size(app, &window, increase)
 }
 
 pub fn reset_note_positions(app: &AppHandle) -> anyhow::Result<()> {

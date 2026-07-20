@@ -7,8 +7,9 @@ use crate::{
     save_load::{note_id_from_label, NoteRepository},
     settings::MenuSettings,
     windows::{
-        apply_note_pin_state, arrange_notes_on_this_side_below, close_window_and_archive,
-        create_sticky, set_window_collapsed, sorted_windows, GeometryIndex,
+        apply_note_pin_state, arrange_notes_on_this_side_below, change_note_font_size,
+        close_window_and_archive, create_sticky, set_window_collapsed, sorted_windows,
+        GeometryIndex,
     },
 };
 
@@ -153,6 +154,15 @@ pub fn arrange_notes_on_this_side_below_current_note(
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
     arrange_notes_on_this_side_below(&app, &window).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn change_font_size(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    increase: bool,
+) -> Result<(), String> {
+    change_note_font_size(&app, &window, increase).map_err(|error| error.to_string())
 }
 
 #[tauri::command]

@@ -45,6 +45,11 @@
   let collapsed = $state(false);
   let fontSize = $state(16);
   let growAfterExpandBaseline: number | undefined;
+  let fontResizeBaseline:
+    | { windowHeight: number; contentHeight: number }
+    | undefined;
+  let fontResizeFrame: number | undefined;
+  let fontResizeRevision = 0;
   let arrangementBusy = $state(false);
   let noteTitle = $state("Empty Note");
   let moveTimer: number | undefined;
@@ -75,6 +80,14 @@
   async function toggleCollapsed() {
     await editor?.flushSave();
     const next = !collapsed;
+    if (next) {
+      if (fontResizeFrame !== undefined) {
+        cancelAnimationFrame(fontResizeFrame);
+        fontResizeFrame = undefined;
+      }
+      fontResizeRevision += 1;
+      fontResizeBaseline = undefined;
+    }
     await invoke("set_collapsed", { collapsed: next });
     collapsed = next;
     colorMenuOpen = false;
@@ -121,6 +134,20 @@
     }
   }
 
+  function changeFontSizeWithShift(event: KeyboardEvent) {
+    if (
+      event.metaKey &&
+      event.shiftKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      (event.code === "Equal" || event.code === "Minus")
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      void invoke("change_font_size", { increase: event.code === "Equal" });
+    }
+  }
+
   onMount(async () => {
     if (shortcutsWindow || versionWindow) return;
     const init = (window as typeof window & { __STICKY_INIT__?: StickyInit })
@@ -131,6 +158,7 @@
 
     if (!init) document.body.classList.add("focused");
     window.addEventListener("keydown", createNoteWithControlN, true);
+    window.addEventListener("keydown", changeFontSizeWithShift, true);
 
     unlisteners.push(
       await appWindow.listen("tauri://focus", async () => {
@@ -150,6 +178,17 @@
       await appWindow.listen<number>("set_font_size", (event) => {
         const previousFontSize = fontSize;
         const increased = event.payload > fontSize;
+        const changed = event.payload !== fontSize;
+        if (!collapsed && changed && fontResizeBaseline === undefined) {
+          const windowHeight = editor?.currentWindowHeight();
+          const contentHeight = editor?.currentContentHeight();
+          if (windowHeight !== undefined && contentHeight !== undefined) {
+            fontResizeBaseline = {
+              windowHeight,
+              contentHeight,
+            };
+          }
+        }
         fontSize = event.payload;
         if (collapsed) {
           if (increased) {
@@ -160,8 +199,28 @@
           ) {
             growAfterExpandBaseline = undefined;
           }
-        } else if (increased) {
-          requestAnimationFrame(() => void editor?.growToFit());
+        } else if (fontResizeBaseline !== undefined) {
+          if (fontResizeFrame !== undefined) {
+            cancelAnimationFrame(fontResizeFrame);
+          }
+          const baseline = fontResizeBaseline;
+          fontResizeRevision += 1;
+          const revision = fontResizeRevision;
+          fontResizeFrame = requestAnimationFrame(() => {
+            fontResizeFrame = undefined;
+            void (async () => {
+              await editor?.resizeForFontSize(
+                baseline.windowHeight,
+                baseline.contentHeight,
+              );
+              if (
+                fontResizeBaseline === baseline &&
+                fontResizeRevision === revision
+              ) {
+                fontResizeBaseline = undefined;
+              }
+            })();
+          });
         }
       }),
       await appWindow.listen("close_note_request", () => closeNote()),
@@ -172,7 +231,9 @@
 
   onDestroy(() => {
     if (moveTimer !== undefined) window.clearTimeout(moveTimer);
+    if (fontResizeFrame !== undefined) cancelAnimationFrame(fontResizeFrame);
     window.removeEventListener("keydown", createNoteWithControlN, true);
+    window.removeEventListener("keydown", changeFontSizeWithShift, true);
     unlisteners.forEach((unlisten) => unlisten());
   });
 </script>

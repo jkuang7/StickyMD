@@ -226,7 +226,7 @@ fn create_view_submenu(app: &AppHandle) -> Result<Submenu<Wry>, anyhow::Error> {
                 MenuCommand::IncreaseFontSize,
                 "Increase Font Size",
                 true,
-                Some("Cmd++"),
+                Some("Cmd+="),
             )?,
             &MenuItem::with_id(
                 app,

@@ -16,7 +16,7 @@
 
 ## Window lifecycle
 
-- Expanded dimensions remain canonical while a note is collapsed. Rust performs fold and unfold resizing, and clamps an expanded note to the display containing its collapsed header. Increasing font size may grow an expanded note to keep its existing content visible, including once after unfolding when the size changed while folded.
+- Expanded dimensions remain canonical while a note is collapsed. Rust performs fold and unfold resizing, and clamps an expanded note to the display containing its collapsed header. Each expanded-note font-size step adjusts window height only by the measured change in content height, preserving its existing visible capacity and making the reverse step restore the prior height. A net increase made while folded grows the note once after unfolding.
 - Note dimensions change only through explicit user resizing and lifecycle operations such as fold, unfold, reset, and font-size accommodation. Ordinary typing and paste keep the current window dimensions and scroll inside the note when necessary.
 - Rust applies the durable pin state to both the native floating-window level and macOS window collection behavior. Pinned notes can join other applications' Stage Manager sets, while unpinned notes retain the app's normal transient behavior.
 - macOS title-bar drags are anchored by Rust to the target native window and current cursor position; frontend code only initiates the drag gesture.
