@@ -351,16 +351,6 @@
     >
       <Icon path={mdiLinkVariant} size={12} />
     </button>
-    <button
-      class="titlebar-button"
-      onclick={(event) => {
-        event.stopPropagation();
-        toggleColorMenu();
-      }}
-      aria-label="select note color"
-    >
-      <Icon path={mdiPalette} size={10} />
-    </button>
     {#if colorMenuOpen}
       {#each colors as color}
         <button
@@ -374,6 +364,16 @@
         ></button>
       {/each}
     {/if}
+    <button
+      class="titlebar-button"
+      onclick={(event) => {
+        event.stopPropagation();
+        toggleColorMenu();
+      }}
+      aria-label="select note color"
+    >
+      <Icon path={mdiPalette} size={10} />
+    </button>
   </div>
   </div>
 
