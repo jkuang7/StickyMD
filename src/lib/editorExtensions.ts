@@ -10,16 +10,13 @@ function removeCheckedTasks(nodes: JSONContent[]): {
 } {
   let removed = false;
   const remaining = nodes.flatMap((node) => {
-    const children = removeCheckedTasks(node.content ?? []);
-    removed ||= children.removed;
-
     if (node.type === "taskItem" && node.attrs?.checked === true) {
       removed = true;
-      // Keep unfinished subtasks by promoting them into the containing list.
-      return children.nodes
-        .filter((child) => child.type === "taskList")
-        .flatMap((list) => list.content ?? []);
+      return [];
     }
+
+    const children = removeCheckedTasks(node.content ?? []);
+    removed ||= children.removed;
 
     if (node.type === "taskList" && children.nodes.length === 0) {
       removed = true;
