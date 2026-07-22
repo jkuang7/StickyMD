@@ -40,6 +40,10 @@
     "#98c260",
     "#e1a1b1",
     "#b98cb3",
+    "#f3c178",
+    "#ef8d7f",
+    "#c9b5e8",
+    "#d1d5db",
   ];
   const appWindow = webviewWindow.getCurrentWebviewWindow();
   const shortcutsWindow = Boolean(
