@@ -86,6 +86,7 @@
 
   async function linkNotesOnThisSide() {
     if (linkBusy) return;
+    if (!window.confirm("Are you sure you want to link these windows?")) return;
     linkBusy = true;
     try {
       await editor?.flushSave();

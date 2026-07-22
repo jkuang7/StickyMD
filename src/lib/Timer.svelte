@@ -336,6 +336,7 @@
 
   async function linkWindowsOnThisSide() {
     if (busy) return;
+    if (!window.confirm("Are you sure you want to link these windows?")) return;
     busy = true;
     errorMessage = "";
     try {
