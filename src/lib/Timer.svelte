@@ -1,6 +1,7 @@
 <script lang="ts">
   import { mdiClose, mdiCog, mdiLinkVariant, mdiPin, mdiPinOff } from "@mdi/js";
   import { invoke } from "@tauri-apps/api/core";
+  import { confirm } from "@tauri-apps/plugin-dialog";
   import { webviewWindow } from "@tauri-apps/api";
   import { onDestroy, onMount, untrack } from "svelte";
 
@@ -336,7 +337,7 @@
 
   async function linkWindowsOnThisSide() {
     if (busy) return;
-    if (!window.confirm("Are you sure you want to link these windows?")) return;
+    if (!(await confirm("Are you sure you want to link these windows?"))) return;
     busy = true;
     errorMessage = "";
     try {

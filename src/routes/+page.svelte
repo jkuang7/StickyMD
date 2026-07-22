@@ -8,6 +8,7 @@
   } from "@mdi/js";
   import { invoke } from "@tauri-apps/api/core";
   import { webviewWindow } from "@tauri-apps/api";
+  import { confirm } from "@tauri-apps/plugin-dialog";
   import { onDestroy, onMount } from "svelte";
 
   import Editor from "$lib/Editor.svelte";
@@ -86,7 +87,7 @@
 
   async function linkNotesOnThisSide() {
     if (linkBusy) return;
-    if (!window.confirm("Are you sure you want to link these windows?")) return;
+    if (!(await confirm("Are you sure you want to link these windows?"))) return;
     linkBusy = true;
     try {
       await editor?.flushSave();
