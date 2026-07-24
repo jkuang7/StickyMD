@@ -26,7 +26,9 @@ use crate::{
 
 const COLLAPSED_HEIGHT: u32 = 24;
 const GROUP_GAP: u32 = 12;
-const RESET_MARGIN: i32 = 20;
+const RESET_EDGE_MARGIN: u32 = 20;
+const RESET_RIGHT_MARGIN: u32 = 64;
+const RESET_TOP_MARGIN: u32 = 64;
 const DRAG_DETACH_THRESHOLD: i32 = 4;
 const NATIVE_POSITION_ROUNDING_TOLERANCE: i32 = 2;
 
@@ -1476,65 +1478,198 @@ pub fn restore_all_notes(app: &AppHandle) -> anyhow::Result<()> {
 
 fn reset_positions_in_work_area(
     work_area: WindowRect,
-    count: usize,
-    preferred_step: i32,
-    header_height: i32,
+    size_blocks: &[Vec<PhysicalSize<u32>>],
+    preferred_gap: i32,
+    preferred_left_margin: i32,
+    preferred_right_margin: i32,
+    preferred_top_margin: i32,
 ) -> anyhow::Result<Vec<PhysicalPosition<i32>>> {
-    if count == 0 {
+    if size_blocks.is_empty() {
         return Ok(Vec::new());
     }
-    let margin = i64::from(RESET_MARGIN.max(0));
-    let header_height = i64::from(header_height.max(1));
-    let x = work_area.x + margin.min(work_area.width.saturating_sub(1).max(0));
-    let top = work_area.y + margin.min(work_area.height.saturating_sub(1).max(0));
-    let bottom = (work_area.bottom() - header_height - margin).max(top);
-    let available = bottom - top;
-    let step = if count == 1 {
-        0
-    } else {
-        i64::from(preferred_step.max(0)).min(available / (count as i64 - 1))
-    };
-    (0..count)
-        .map(|index| {
-            Ok(PhysicalPosition::new(
-                i32::try_from(x).context("Reset x-position exceeded platform limits")?,
-                i32::try_from(top + index as i64 * step)
-                    .context("Reset y-position exceeded platform limits")?,
-            ))
-        })
-        .collect()
+    let left_margin = i64::from(preferred_left_margin.max(0));
+    let right_margin = i64::from(preferred_right_margin.max(0));
+    let top_margin =
+        i64::from(preferred_top_margin.max(0)).min(work_area.height.saturating_sub(1).max(0));
+    let maximum_horizontal_margin = work_area.width.saturating_sub(1).max(0);
+    let left_margin = left_margin.min(maximum_horizontal_margin);
+    let right_margin = right_margin.min(maximum_horizontal_margin);
+    let bottom_margin = left_margin.min(
+        work_area
+            .height
+            .saturating_sub(top_margin)
+            .saturating_sub(1)
+            .max(0),
+    );
+    let left = work_area.x + left_margin;
+    let right = work_area.right() - right_margin;
+    let top = work_area.y + top_margin;
+    let bottom = work_area.bottom() - bottom_margin;
+    if right <= left || bottom <= top {
+        bail!("Primary display work area is too small to reset window positions");
+    }
+
+    let gap = i64::from(preferred_gap.max(0));
+    let mut positions = Vec::with_capacity(size_blocks.iter().map(Vec::len).sum());
+    let mut block_index = 0;
+    let mut column_right = right;
+    while block_index < size_blocks.len() {
+        let column_start = block_index;
+        let mut column_width = 0;
+        let mut y = top;
+        let mut column = Vec::new();
+        while block_index < size_blocks.len() {
+            let block = &size_blocks[block_index];
+            if block.is_empty() {
+                bail!("Reset layout contained an empty window group");
+            }
+            let block_width = block
+                .iter()
+                .map(|size| i64::from(size.width.max(1)))
+                .max()
+                .context("Reset layout contained an empty window group")?;
+            let block_height =
+                block
+                    .iter()
+                    .enumerate()
+                    .try_fold(0_i64, |height, (index, size)| {
+                        let height = height
+                            .checked_add(i64::from(size.height.max(1)))
+                            .context("Reset window group height overflowed")?;
+                        if index + 1 < block.len() {
+                            height
+                                .checked_add(gap)
+                                .context("Reset window group gap overflowed")
+                        } else {
+                            Ok(height)
+                        }
+                    })?;
+            if block_width > right - left || block_height > bottom - top {
+                bail!("A linked window group is too large to fit inside the primary display work area");
+            }
+            let block_bottom = y
+                .checked_add(block_height)
+                .context("Reset window layout height overflowed")?;
+            if block_index > column_start && block_bottom > bottom {
+                break;
+            }
+            column_width = column_width.max(block_width);
+            let mut member_y = y;
+            for size in block {
+                let width = i64::from(size.width.max(1));
+                let height = i64::from(size.height.max(1));
+                column.push((width, member_y));
+                member_y = member_y
+                    .checked_add(height)
+                    .and_then(|value| value.checked_add(gap))
+                    .context("Reset linked window position overflowed")?;
+            }
+            y = block_bottom
+                .checked_add(gap)
+                .context("Reset window layout gap overflowed")?;
+            block_index += 1;
+        }
+
+        let column_left = column_right
+            .checked_sub(column_width)
+            .context("Reset window layout width overflowed")?;
+        if column_left < left {
+            bail!("Active windows do not fit without overlap on the primary display");
+        }
+        for (width, y) in column {
+            positions.push(PhysicalPosition::new(
+                i32::try_from(column_right - width)
+                    .context("Reset x-position exceeded platform limits")?,
+                i32::try_from(y).context("Reset y-position exceeded platform limits")?,
+            ));
+        }
+        column_right = column_left
+            .checked_sub(gap)
+            .context("Reset window column gap overflowed")?;
+    }
+    Ok(positions)
 }
 
-pub fn reset_note_positions(app: &AppHandle) -> anyhow::Result<()> {
+pub fn reset_window_positions(app: &AppHandle) -> anyhow::Result<()> {
     let runtime_state = app.state::<GroupRuntime>();
     let mut runtime = runtime_state.lock()?;
     open_missing_active_notes(app)?;
+    let repository = app.state::<NoteRepository>();
     let geometries = app.state::<GeometryIndex>();
-    let snapshots = sorted_windows(app)
+    let mut active_members = repository
+        .active()?
         .into_iter()
-        .map(|window| {
-            let id = note_id_from_label(window.label())?.to_string();
-            let geometry = geometries.get(&id)?;
-            Ok(WindowSnapshot {
-                member: StoredGroupMember::note(id),
-                window,
-                position: geometry.position,
-                size: geometry.size,
-            })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    if snapshots.is_empty() {
+        .map(|note| StoredGroupMember::note(note.id))
+        .collect::<Vec<_>>();
+    let timer_repository = app.state::<TimerRepository>();
+    if timer_repository.is_available() {
+        active_members.extend(
+            timer_repository
+                .all()?
+                .into_iter()
+                .filter(|timer| {
+                    app.get_webview_window(&format!("timer_{}", timer.id))
+                        .is_some()
+                })
+                .map(|timer| StoredGroupMember::timer(timer.id)),
+        );
+    }
+    if active_members.is_empty() {
         return Ok(());
     }
+    let active_set: HashSet<_> = active_members.iter().cloned().collect();
+    let mut grouped_members = HashSet::new();
+    let mut ordered_blocks = Vec::new();
+    for group in repository.all_groups()? {
+        let members = group
+            .members
+            .into_iter()
+            .filter(|member| active_set.contains(member))
+            .collect::<Vec<_>>();
+        if let Some(first) = members.first() {
+            let position = geometries.get(&first.id)?.position;
+            grouped_members.extend(members.iter().cloned());
+            ordered_blocks.push((position, members));
+        }
+    }
+    for member in active_members {
+        if !grouped_members.contains(&member) {
+            ordered_blocks.push((geometries.get(&member.id)?.position, vec![member]));
+        }
+    }
+    ordered_blocks.sort_by(|a, b| (a.0.y, a.0.x, &a.1[0]).cmp(&(b.0.y, b.0.x, &b.1[0])));
+    let member_blocks = ordered_blocks
+        .into_iter()
+        .map(|(_, members)| members)
+        .collect::<Vec<_>>();
+    let ordered_members = member_blocks.iter().flatten().cloned().collect::<Vec<_>>();
+    let snapshots = snapshots_for_members(app, &ordered_members)?;
     let monitor = app
         .primary_monitor()?
-        .context("No primary monitor available for resetting note positions")?;
+        .context("No primary monitor available for resetting window positions")?;
     let scale = monitor.scale_factor();
     let work_area =
         WindowRect::from_physical(monitor.work_area().position, monitor.work_area().size);
-    let step = (f64::from(COLLAPSED_HEIGHT + GROUP_GAP) * scale).round() as i32;
-    let header_height = (f64::from(COLLAPSED_HEIGHT) * scale).round() as i32;
-    let targets = reset_positions_in_work_area(work_area, snapshots.len(), step, header_height)?;
+    let gap = (f64::from(GROUP_GAP) * scale).round() as i32;
+    let edge_margin = (f64::from(RESET_EDGE_MARGIN) * scale).round() as i32;
+    let right_margin = (f64::from(RESET_RIGHT_MARGIN) * scale).round() as i32;
+    let top_margin = (f64::from(RESET_TOP_MARGIN) * scale).round() as i32;
+    let size_blocks = ordered_members
+        .iter()
+        .map(|member| {
+            stored_surface(app, member).map(|surface| {
+                vec![LogicalSize::new(surface.width(), surface.durable_height()).to_physical(scale)]
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let targets = reset_positions_in_work_area(
+        work_area,
+        &size_blocks,
+        gap,
+        edge_margin,
+        right_margin,
+        top_margin,
+    )?;
     for snapshot in &snapshots {
         snapshot.window.show()?;
         if snapshot.window.is_minimized()? {
@@ -1546,37 +1681,50 @@ pub fn reset_note_positions(app: &AppHandle) -> anyhow::Result<()> {
             restore_snapshots(&snapshots[..index], &geometries, &mut runtime);
             return Err(error.into());
         }
-        geometries.set_position(&snapshot.member.id, *target)?;
+        if let Err(error) = geometries.set_position(&snapshot.member.id, *target) {
+            restore_snapshots(&snapshots[..=index], &geometries, &mut runtime);
+            return Err(error.context("Could not cache reset window position"));
+        }
         runtime.record_programmatic_position(snapshot.member.runtime_key(), *target);
     }
-    let positions = snapshots
+    let replacements = match snapshots
         .iter()
         .zip(&targets)
         .map(|(snapshot, target)| {
-            let logical = target.to_logical::<i32>(snapshot.window.scale_factor()?);
-            Ok((snapshot.member.id.clone(), logical.x, logical.y))
+            let mut surface = stored_surface(app, &snapshot.member)?;
+            let logical = target.to_logical::<i32>(scale);
+            surface.set_position(logical.x, logical.y);
+            Ok(surface)
         })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let persist = app.state::<NoteRepository>().mutate(|store| {
-        store.groups.clear();
-        for (id, x, y) in &positions {
-            let note = store
-                .notes
-                .get_mut(id)
-                .with_context(|| format!("Cannot reset missing note {id}"))?;
-            note.x = *x;
-            note.y = *y;
+        .collect::<anyhow::Result<Vec<_>>>()
+    {
+        Ok(replacements) => replacements,
+        Err(error) => {
+            restore_snapshots(&snapshots, &geometries, &mut runtime);
+            return Err(error.context("Could not prepare reset window positions"));
         }
+    };
+    let original_surfaces = match persist_surface_changes(app, &replacements) {
+        Ok(originals) => originals,
+        Err(error) => {
+            restore_snapshots(&snapshots, &geometries, &mut runtime);
+            return Err(error.context("Could not persist reset window positions"));
+        }
+    };
+    if let Err(error) = repository.mutate(|store| {
+        store.groups.clear();
         Ok(())
-    });
-    if let Err(error) = persist {
+    }) {
+        restore_surface_changes(app, &original_surfaces);
         restore_snapshots(&snapshots, &geometries, &mut runtime);
-        return Err(error.context("Could not persist reset note positions"));
+        return Err(error.context("Could not unlink windows after resetting their positions"));
     }
-    snapshots[0]
+    snapshots
+        .first()
+        .context("Reset layout did not contain a window")?
         .window
         .set_focus()
-        .context("Could not focus reset notes")
+        .context("Could not focus reset windows")
 }
 
 pub fn restore_group_layouts(app: &AppHandle) -> anyhow::Result<()> {
@@ -1923,19 +2071,39 @@ mod tests {
     }
 
     #[test]
-    fn reset_positions_keep_every_note_header_in_the_work_area() {
+    fn reset_positions_pack_ordered_windows_from_upper_right_with_reserved_gap() {
         let work_area = WindowRect {
             x: -1200,
             y: 24,
             width: 900,
-            height: 100,
+            height: 600,
         };
-        let positions = reset_positions_in_work_area(work_area, 4, 36, 24).unwrap();
+        let size_blocks = [
+            vec![PhysicalSize::new(300, 250)],
+            vec![PhysicalSize::new(280, 24)],
+            vec![PhysicalSize::new(300, 250)],
+            vec![PhysicalSize::new(300, 176)],
+        ];
+        let positions =
+            reset_positions_in_work_area(work_area, &size_blocks, 12, 20, 64, 64).unwrap();
 
-        assert_eq!(positions[0], PhysicalPosition::new(-1180, 44));
-        assert_eq!(positions[3], PhysicalPosition::new(-1180, 80));
-        assert!(positions.iter().all(|position| {
-            i64::from(position.y) >= work_area.y && i64::from(position.y) + 24 <= work_area.bottom()
-        }));
+        assert_eq!(positions[0], PhysicalPosition::new(-664, 88));
+        assert_eq!(positions[1], PhysicalPosition::new(-644, 350));
+        assert_eq!(positions[2], PhysicalPosition::new(-976, 88));
+        assert_eq!(positions[3], PhysicalPosition::new(-976, 350));
+        let sizes = size_blocks.into_iter().flatten().collect::<Vec<_>>();
+        let rectangles = positions
+            .iter()
+            .zip(sizes)
+            .map(|(position, size)| WindowRect::from_physical(*position, size))
+            .collect::<Vec<_>>();
+        for (index, rectangle) in rectangles.iter().enumerate() {
+            assert!(rectangles[index + 1..].iter().all(|other| {
+                rectangle.right() + 12 <= other.x
+                    || other.right() + 12 <= rectangle.x
+                    || rectangle.bottom() + 12 <= other.y
+                    || other.bottom() + 12 <= rectangle.y
+            }));
+        }
     }
 }

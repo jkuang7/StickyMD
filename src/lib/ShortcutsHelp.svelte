@@ -12,7 +12,7 @@
         ["Close window", "⌘ W"],
         ["Reopen last closed note", "⇧ ⌘ T"],
         ["Restore all notes", "⇧ ⌘ U"],
-        ["Reset positions", "⇧ ⌘ R"],
+        ["Reset window positions", "⇧ ⌘ R"],
         ["Hide or show all notes", "⇧ ⌘ H"],
         ["Quit Sticky", "⌘ Q"],
       ],

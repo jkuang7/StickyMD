@@ -7,7 +7,7 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_log::log;
 
 use crate::groups::{
-    link_windows_on_this_side_below_focused, reset_note_positions, unlink_group_for_focused,
+    link_windows_on_this_side_below_focused, reset_window_positions, unlink_group_for_focused,
 };
 use crate::save_load::save_settings;
 use crate::settings::MenuSettings;
@@ -103,7 +103,7 @@ fn create_window_submenu(app: &AppHandle) -> Result<Submenu<Wry>, anyhow::Error>
             &MenuItem::with_id(
                 app,
                 MenuCommand::ResetPositions,
-                "Reset Note Positions",
+                "Reset Window Positions",
                 true,
                 Some("Cmd+Shift+R"),
             )?,
@@ -313,7 +313,7 @@ pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
             if let Err(e) = match command {
                 MenuCommand::NewNote => create_sticky(app).map(|_| ()),
                 MenuCommand::NewTimer => create_timer_window(app).map(|_| ()),
-                MenuCommand::ResetPositions => reset_note_positions(app),
+                MenuCommand::ResetPositions => reset_window_positions(app),
                 MenuCommand::LinkWindowsOnThisSideBelowCurrent => {
                     link_windows_on_this_side_below_focused(app)
                 }
