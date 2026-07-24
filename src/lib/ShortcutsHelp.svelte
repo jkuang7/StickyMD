@@ -20,6 +20,7 @@
     {
       title: "Editor",
       shortcuts: [
+        ["Find in note", "⌘ F"],
         ["Increase font size", "⌘ +"],
         ["Decrease font size", "⌘ -"],
         ["Bullet list", "⇧ ⌘ 0"],

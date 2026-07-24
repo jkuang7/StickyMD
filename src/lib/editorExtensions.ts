@@ -1,6 +1,7 @@
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { Placeholder } from "@tiptap/extension-placeholder";
 import { Extension, type Editor, type JSONContent } from "@tiptap/core";
+import { Markdown } from "@tiptap/markdown";
 import {
   Fragment,
   type Node as ProseMirrorNode,
@@ -9,6 +10,7 @@ import {
 } from "@tiptap/pm/model";
 import {
   AllSelection,
+  Plugin,
   Selection,
   TextSelection,
   type EditorState,
@@ -16,6 +18,79 @@ import {
 } from "@tiptap/pm/state";
 import { canJoin } from "@tiptap/pm/transform";
 import { StarterKit } from "@tiptap/starter-kit";
+import { search } from "prosemirror-search";
+
+const structuralMarkdownLine =
+  /^(?: {0,3}#{1,6}[ \t]+| {0,3}>[ \t]?| {0,3}(?:[-+*]|\d+[.)])[ \t]+| {0,3}(?:`{3,}|~{3,}).*$| {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$)/m;
+const markdownLink = /!?\[[^\]\n]+\]\(\s*\S+(?:\s+["'][^"'\n]*["'])?\s*\)/;
+const inlineCode = /(^|[^`])`[^`\n]+`([^`]|$)/;
+const strongEmphasis =
+  /(^|[\s([{])(?:\*\*(?=\S)(?:[^*\n]*\S)?\*\*|__(?=\S)(?:[^_\n]*\S)?__)(?=$|[\s)\]},.!?;:])/;
+const singleEmphasis =
+  /(^|[\s([{])(?:\*(?=\S)(?:[^*\n]*\S)?\*|_(?=\S)(?:[^_\n]*\S)?_)(?=$|[\s)\]},.!?;:])/;
+
+export function looksLikeMarkdown(text: string): boolean {
+  if (!text.trim()) return false;
+  return (
+    structuralMarkdownLine.test(text) ||
+    markdownLink.test(text) ||
+    inlineCode.test(text) ||
+    strongEmphasis.test(text) ||
+    singleEmphasis.test(text)
+  );
+}
+
+export function insertMarkdownPaste(editor: Editor, markdown: string): boolean {
+  const manager = editor.markdown;
+  if (!manager) return false;
+  const parsed = manager.parse(markdown);
+  const content = parsed.content ?? [];
+  if (content.length === 0) return false;
+
+  const { from, to } = editor.state.selection;
+  return editor.commands.insertContentAt({ from, to }, content);
+}
+
+export function insertMarkdownClipboard(
+  editor: Editor,
+  clipboard: Pick<DataTransfer, "getData">,
+): boolean {
+  const text = clipboard.getData("text/plain");
+  if (!looksLikeMarkdown(text)) return false;
+
+  try {
+    return insertMarkdownPaste(editor, text);
+  } catch (error) {
+    console.warn("Could not parse pasted Markdown", error);
+    return false;
+  }
+}
+
+const MarkdownPaste = Extension.create({
+  name: "stickyMarkdownPaste",
+  priority: 1_100,
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          handlePaste: (_view, event) => {
+            const clipboard = event.clipboardData;
+            return clipboard
+              ? insertMarkdownClipboard(this.editor, clipboard)
+              : false;
+          },
+        },
+      }),
+    ];
+  },
+});
+
+const NoteSearch = Extension.create({
+  name: "stickyNoteSearch",
+  addProseMirrorPlugins() {
+    return [search()];
+  },
+});
 
 function removeCheckedTasks(nodes: JSONContent[]): {
   nodes: JSONContent[];
@@ -848,6 +923,9 @@ export function createEditorExtensions() {
     TaskItem.configure({
       nested: true,
     }),
+    Markdown,
+    MarkdownPaste,
+    NoteSearch,
     StickyShortcuts,
     Placeholder.configure({
       placeholder: "Empty Note",

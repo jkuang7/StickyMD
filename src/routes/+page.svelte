@@ -202,6 +202,23 @@
     }
   }
 
+  function findInNote(event: KeyboardEvent) {
+    if (
+      event.metaKey &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === "f"
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      void (async () => {
+        if (collapsed) await toggleCollapsed();
+        requestAnimationFrame(() => editor?.openFind());
+      })();
+    }
+  }
+
   onMount(async () => {
     if (shortcutsWindow || versionWindow || timerInit) return;
     const init = (window as typeof window & { __STICKY_INIT__?: StickyInit })
@@ -213,6 +230,7 @@
     if (!init) document.body.classList.add("focused");
     window.addEventListener("keydown", createNoteWithControlN, true);
     window.addEventListener("keydown", changeFontSizeWithShift, true);
+    window.addEventListener("keydown", findInNote, true);
 
     unlisteners.push(
       await appWindow.listen("tauri://focus", async () => {
@@ -290,6 +308,7 @@
     if (fontResizeFrame !== undefined) cancelAnimationFrame(fontResizeFrame);
     window.removeEventListener("keydown", createNoteWithControlN, true);
     window.removeEventListener("keydown", changeFontSizeWithShift, true);
+    window.removeEventListener("keydown", findInNote, true);
     unlisteners.forEach((unlisten) => unlisten());
   });
 </script>
