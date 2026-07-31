@@ -22,6 +22,7 @@ mod menu;
 mod pinned_windows;
 mod save_load;
 mod settings;
+mod text_checking;
 mod timers;
 mod updater;
 mod windows;
@@ -117,6 +118,9 @@ fn reconcile_autostart_on_launch(app: &tauri::AppHandle, settings: &MenuSettings
 }
 
 pub fn run() {
+    // WebKit reads these once, before the first note webview exists.
+    text_checking::configure_macos_text_checking();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Err(error) = focus_existing_or_create(app) {

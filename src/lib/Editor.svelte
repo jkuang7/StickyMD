@@ -309,8 +309,12 @@
       content: init?.document ?? { type: "doc", content: [{ type: "paragraph" }] },
       editorProps: {
         attributes: {
-          autocorrect: "off",
-          spellcheck: "false",
+          // macOS delivers Text Replacement through the same text-checking pass
+          // as spelling and autocorrect, so either attribute disabled here also
+          // disables replacement. Which substitutions actually run is chosen in
+          // Rust (see src-tauri/src/text_checking.rs).
+          autocorrect: "on",
+          spellcheck: "true",
         },
         handleDOMEvents: {
           focusin: (view, event) => {
