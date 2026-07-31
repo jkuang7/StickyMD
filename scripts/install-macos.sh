@@ -107,6 +107,17 @@ trap - EXIT
 echo "Opening the installed app..."
 open "$TARGET_APP"
 
+# Launching alone can leave Sticky behind the window that started the install,
+# so raise it once it is running. A second open activates an already-running
+# app without needing permission to script it.
+for _ in {1..50}; do
+  if pgrep -x "$APP_PROCESS" >/dev/null 2>&1; then
+    open -a "$TARGET_APP" >/dev/null 2>&1 || true
+    break
+  fi
+  sleep 0.1
+done
+
 echo
 echo "Done: $TARGET_APP"
 echo "Your notes remain in ~/Library/Application Support/$APP_BUNDLE_ID/notes.json"
