@@ -92,6 +92,80 @@ const NoteSearch = Extension.create({
   },
 });
 
+// A task item counts as selected only when the selection touches its own text.
+// Testing the item's whole range would also match ancestors of a nested item,
+// so a cursor in a sub-task would drag its parent along.
+export function selectedTaskItemPositions(state: EditorState): number[] {
+  const { from, to } = state.selection;
+  const positions: number[] = [];
+  state.doc.nodesBetween(from, to, (node, pos) => {
+    if (node.type.name !== "taskItem") return;
+
+    const paragraph = node.firstChild;
+    if (!paragraph) return;
+    const paragraphFrom = pos + 1;
+    const paragraphTo = paragraphFrom + paragraph.nodeSize;
+    if (from <= paragraphTo && to >= paragraphFrom) positions.push(pos);
+  });
+  return positions;
+}
+
+// Clicking a checkbox only toggles its own item, so a multi-item selection would
+// otherwise need one click per box. Apply the clicked box's new state to every
+// selected task item instead.
+const TaskSelectionCheck = Extension.create({
+  name: "stickyTaskSelectionCheck",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          handleDOMEvents: {
+            // Runs once Tiptap's own handler has toggled the clicked item, so
+            // the box the user pressed keeps the state the browser gave it and
+            // only the rest of the selection still needs updating. Cancelling
+            // the click instead would leave that box visually unchecked: the
+            // browser reverts a cancelled checkbox after every click listener,
+            // undoing whatever the node view had just written to it.
+            change: (view, event) => {
+              const target = event.target;
+              if (
+                !(target instanceof HTMLInputElement) ||
+                target.type !== "checkbox"
+              ) {
+                return false;
+              }
+
+              const positions = selectedTaskItemPositions(view.state);
+              if (positions.length < 2) return false;
+
+              const clicked = positions.find((pos) => {
+                const dom = view.nodeDOM(pos);
+                return dom instanceof HTMLElement && dom.contains(target);
+              });
+              if (clicked === undefined) return false;
+
+              const checked = view.state.doc.nodeAt(clicked)?.attrs.checked;
+              const transaction = view.state.tr;
+              positions.forEach((pos) => {
+                const node = transaction.doc.nodeAt(pos);
+                if (!node || node.attrs.checked === checked) return;
+                transaction.setNodeMarkup(pos, undefined, {
+                  ...node.attrs,
+                  checked,
+                });
+              });
+              if (!transaction.docChanged) return false;
+
+              view.dispatch(transaction);
+              return true;
+            },
+          },
+        },
+      }),
+    ];
+  },
+});
+
 function removeCheckedTasks(nodes: JSONContent[]): {
   nodes: JSONContent[];
   removed: boolean;
@@ -926,6 +1000,7 @@ export function createEditorExtensions() {
     Markdown,
     MarkdownPaste,
     NoteSearch,
+    TaskSelectionCheck,
     StickyShortcuts,
     Placeholder.configure({
       placeholder: "Empty Note",
