@@ -16,6 +16,11 @@
   import ShortcutsHelp from "$lib/ShortcutsHelp.svelte";
   import Timer from "$lib/Timer.svelte";
   import Version from "$lib/Version.svelte";
+  import {
+    createNoteActionAdapter,
+    createUserActionInputAdapter,
+    createUserActionWorkflow,
+  } from "$lib/userActionWorkflow";
 
   interface StickyInit {
     always_on_top?: boolean;
@@ -73,6 +78,7 @@
   let noteTitle = $state("Empty Note");
   let moveTimer: number | undefined;
   let geometrySettleRevision = 0;
+  let actionError = $state("");
   const unlisteners: Array<() => void> = [];
 
   const geometryDebounceMs = 150;
@@ -97,9 +103,28 @@
     }
   }
 
-  async function closeNote() {
-    await editor?.flushSave();
-    await invoke("close_window");
+  const userActionWorkflow = createUserActionWorkflow(() =>
+    createNoteActionAdapter({
+      async flushPendingContent() {
+        if (!editor) throw new Error("The note editor is not ready");
+        await editor.flushSave();
+      },
+      closeSurface: () => invoke("close_window"),
+    }),
+  );
+  const userActionInput = createUserActionInputAdapter(
+    userActionWorkflow,
+    (outcome) => {
+      if (outcome.status === "failed") {
+        actionError = outcome.message;
+      } else if (outcome.status === "succeeded") {
+        actionError = "";
+      }
+    },
+  );
+
+  function closeNote() {
+    return userActionInput.close();
   }
 
   async function toggleCollapsed() {
@@ -297,7 +322,7 @@
           });
         }
       }),
-      await appWindow.listen("close_note_request", () => closeNote()),
+      await appWindow.listen("user_action_close_requested", () => closeNote()),
       await appWindow.listen("tauri://move", saveGeometryDebounced),
       await appWindow.listen("tauri://resize", saveGeometryDebounced),
     );
@@ -404,6 +429,9 @@
   </div>
 
   <main class:collapsed>
+    {#if actionError}
+      <div class="action-error" role="alert">{actionError}</div>
+    {/if}
     <Editor
       bind:this={editor}
       {fontSize}
@@ -486,9 +514,22 @@
 
   main {
     height: calc(100vh - 24px);
+    position: relative;
   }
 
   main.collapsed {
     display: none;
+  }
+
+  .action-error {
+    background: rgba(120, 0, 0, 0.88);
+    color: white;
+    font-size: 12px;
+    left: 8px;
+    padding: 4px 6px;
+    position: absolute;
+    right: 8px;
+    top: 6px;
+    z-index: 3;
   }
 </style>

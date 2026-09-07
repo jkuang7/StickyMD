@@ -6,6 +6,11 @@
   import { onDestroy, onMount, untrack } from "svelte";
 
   import Icon from "$lib/Icon.svelte";
+  import {
+    createTimerActionAdapter,
+    createUserActionInputAdapter,
+    createUserActionWorkflow,
+  } from "$lib/userActionWorkflow";
 
   interface TimerSnapshot {
     id: string;
@@ -304,13 +309,24 @@
     }
   }
 
-  async function closeTimer() {
-    errorMessage = "";
-    try {
-      await invoke("close_window");
-    } catch (error) {
-      errorMessage = String(error);
-    }
+  const userActionWorkflow = createUserActionWorkflow(() =>
+    createTimerActionAdapter({
+      closeSurface: () => invoke("close_window"),
+    }),
+  );
+  const userActionInput = createUserActionInputAdapter(
+    userActionWorkflow,
+    (outcome) => {
+      if (outcome.status === "failed") {
+        errorMessage = outcome.message;
+      } else if (outcome.status === "succeeded") {
+        errorMessage = "";
+      }
+    },
+  );
+
+  function closeTimer() {
+    return userActionInput.close();
   }
 
   async function startWindowDrag() {
@@ -385,6 +401,7 @@
       await appWindow.listen("tauri://move", () => {
         void invoke("save_geometry");
       }),
+      await appWindow.listen("user_action_close_requested", () => closeTimer()),
     );
   });
 

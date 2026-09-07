@@ -621,25 +621,22 @@ pub fn request_close_window(app: &AppHandle) -> Result<(), anyhow::Error> {
             }
         }
     }
-    if let Some(window) = app
+    let target = app
         .webview_windows()
         .into_iter()
         .find_map(|(label, window)| {
-            (label.starts_with("timer_") && window.is_focused().unwrap_or(false)).then_some(window)
+            ((label.starts_with("sticky_") || label.starts_with("timer_"))
+                && window.is_focused().unwrap_or(false))
+            .then_some(window)
         })
-    {
-        return crate::groups::close_window(&window);
-    }
-    if let Some(window) = get_focused_window(app) {
-        window.emit_to(
-            EventTarget::webview_window(window.label()),
-            "close_note_request",
-            (),
-        )?;
-        Ok(())
-    } else {
-        bail!("No window currently focused!")
-    }
+        .context("No note or timer is currently focused")?;
+
+    target.emit_to(
+        EventTarget::webview_window(target.label()),
+        "user_action_close_requested",
+        (),
+    )?;
+    Ok(())
 }
 
 pub(crate) fn close_ungrouped_window_and_archive(
