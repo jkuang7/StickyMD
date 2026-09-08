@@ -245,3 +245,112 @@ test("fold shares the workflow busy policy with every other action", async () =>
   release();
   assert.deepEqual(await fold, { status: "succeeded" });
 });
+
+test("note pin and unpin flush before the pin transaction", async () => {
+  const events: string[] = [];
+  const target = createNoteActionAdapter({
+    flushPendingContent: async () => events.push("flush"),
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async (pinned) =>
+      events.push(pinned ? "pin" : "unpin"),
+  });
+  const workflow = createUserActionWorkflow(() => target);
+
+  assert.deepEqual(await workflow.perform("pin"), { status: "succeeded" });
+  assert.deepEqual(await workflow.perform("unpin"), { status: "succeeded" });
+  assert.deepEqual(events, ["flush", "pin", "flush", "unpin"]);
+});
+
+test("failed note flush prevents every pin representation from changing", async () => {
+  const mutations: boolean[] = [];
+  const target = createNoteActionAdapter({
+    flushPendingContent: async () => {
+      throw new Error("save unavailable");
+    },
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async (pinned) => mutations.push(pinned),
+  });
+  const workflow = createUserActionWorkflow(() => target);
+
+  assert.deepEqual(await workflow.perform("pin"), {
+    status: "failed",
+    message: "save unavailable",
+  });
+  assert.deepEqual(mutations, []);
+});
+
+test("timer pin skips note persistence and returns one transaction failure", async () => {
+  const requested: boolean[] = [];
+  const target = createTimerActionAdapter({
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    async setSurfacePinned(pinned) {
+      requested.push(pinned);
+      throw new Error("registry failed; durable rollback failed");
+    },
+  });
+  const workflow = createUserActionWorkflow(() => target);
+
+  assert.deepEqual(await workflow.perform("unpin"), {
+    status: "failed",
+    message: "registry failed; durable rollback failed",
+  });
+  assert.deepEqual(requested, [false]);
+});
+
+test("the shared input adapter routes pin outcomes through its renderer", async () => {
+  const actions: string[] = [];
+  const rendered: unknown[] = [];
+  const workflow = {
+    async perform(action) {
+      actions.push(action);
+      return { status: "succeeded" };
+    },
+  };
+  const adapter = createUserActionInputAdapter(workflow, (outcome) =>
+    rendered.push(outcome),
+  );
+
+  assert.deepEqual(await adapter.pin(), { status: "succeeded" });
+  assert.deepEqual(await adapter.unpin(), { status: "succeeded" });
+  assert.deepEqual(actions, ["pin", "unpin"]);
+  assert.deepEqual(rendered, [
+    { status: "succeeded" },
+    { status: "succeeded" },
+  ]);
+});
+
+test("pin shares stable targeting and the workflow busy policy", async () => {
+  let release!: () => void;
+  const events: string[] = [];
+  const first = createTimerActionAdapter({
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: () =>
+      new Promise<void>((resolve) => {
+        events.push("first pin");
+        release = resolve;
+      }),
+  });
+  const second = createTimerActionAdapter({
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => events.push("second pin"),
+  });
+  let focused = first;
+  const workflow = createUserActionWorkflow(() => focused);
+
+  const pin = workflow.perform("pin");
+  await new Promise((resolve) => setImmediate(resolve));
+  focused = second;
+  assert.deepEqual(await workflow.perform("unpin"), {
+    status: "busy",
+    message: "Another user action is already running",
+  });
+  release();
+
+  assert.deepEqual(await pin, { status: "succeeded" });
+  assert.deepEqual(events, ["first pin"]);
+});

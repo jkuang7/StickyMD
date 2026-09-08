@@ -300,13 +300,13 @@
 
   async function toggleAlwaysOnTop() {
     const next = !alwaysOnTop;
-    errorMessage = "";
-    try {
-      await invoke("set_timer_always_on_top", { alwaysOnTop: next });
-      alwaysOnTop = next;
-    } catch (error) {
-      errorMessage = String(error);
-    }
+    const outcome = next
+      ? await userActionInput.pin()
+      : await userActionInput.unpin();
+    if (outcome.status !== "succeeded") return outcome;
+
+    alwaysOnTop = next;
+    return outcome;
   }
 
   const userActionWorkflow = createUserActionWorkflow(() =>
@@ -314,6 +314,8 @@
       closeSurface: () => invoke("close_window"),
       setSurfaceCollapsed: (next) =>
         invoke("set_collapsed", { collapsed: next }),
+      setSurfacePinned: (next) =>
+        invoke("set_timer_always_on_top", { alwaysOnTop: next }),
     }),
   );
   const userActionInput = createUserActionInputAdapter(

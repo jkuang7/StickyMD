@@ -85,10 +85,14 @@
   const mouseReleasePollMs = 50;
 
   async function toggleAlwaysOnTop() {
-    await editor?.flushSave();
     const next = !alwaysOnTop;
-    await invoke("set_note_always_on_top", { alwaysOnTop: next });
+    const outcome = next
+      ? await userActionInput.pin()
+      : await userActionInput.unpin();
+    if (outcome.status !== "succeeded") return outcome;
+
     alwaysOnTop = next;
+    return outcome;
   }
 
   async function linkNotesOnThisSide() {
@@ -121,6 +125,8 @@
         }
         await invoke("set_collapsed", { collapsed: next });
       },
+      setSurfacePinned: (next) =>
+        invoke("set_note_always_on_top", { alwaysOnTop: next }),
     }),
   );
   const userActionInput = createUserActionInputAdapter(

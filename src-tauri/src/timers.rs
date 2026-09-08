@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::{
     pinned_windows::sync_pinned_window_registry,
+    user_action_workflow::{PinTarget, PinWorkflow},
     windows::{apply_window_pin_state, GeometryIndex, NoteGeometry},
 };
 
@@ -1163,31 +1164,44 @@ pub fn timer_apply_settings(
 
 #[tauri::command]
 pub fn set_timer_always_on_top(window: WebviewWindow, always_on_top: bool) -> Result<(), String> {
-    let id = timer_id_from_label(window.label()).map_err(|error| error.to_string())?;
-    let repository = window.state::<TimerRepository>();
-    let previous = repository
-        .get(id)
+    let id = timer_id_from_label(window.label())
         .map_err(|error| error.to_string())?
-        .pinned;
-    apply_window_pin_state(&window, always_on_top).map_err(|error| error.to_string())?;
-    if let Err(error) = repository.update(id, |timer| {
-        timer.pinned = always_on_top;
-        Ok(())
-    }) {
-        let _ = apply_window_pin_state(&window, previous);
-        return Err(error.to_string());
+        .to_owned();
+    PinWorkflow::perform(&mut TimerPinTarget { window, id }, always_on_top)
+        .map_err(|error| error.to_string())
+}
+
+struct TimerPinTarget {
+    window: WebviewWindow,
+    id: String,
+}
+
+impl PinTarget for TimerPinTarget {
+    fn current_pinned(&self) -> anyhow::Result<bool> {
+        Ok(self.window.state::<TimerRepository>().get(&self.id)?.pinned)
     }
-    if let Err(error) = sync_pinned_window_registry(window.app_handle(), None) {
-        repository
-            .update(id, |timer| {
-                timer.pinned = previous;
+
+    fn set_native_pinned(&mut self, pinned: bool) -> anyhow::Result<()> {
+        apply_window_pin_state(&self.window, pinned)
+    }
+
+    fn set_durable_pinned(&mut self, pinned: bool) -> anyhow::Result<()> {
+        self.window
+            .state::<TimerRepository>()
+            .update(&self.id, |timer| {
+                timer.pinned = pinned;
                 Ok(())
             })
-            .map_err(|rollback| rollback.to_string())?;
-        apply_window_pin_state(&window, previous).map_err(|rollback| rollback.to_string())?;
-        return Err(error.to_string());
+            .map(|_| ())
     }
-    window.set_focus().map_err(|error| error.to_string())
+
+    fn sync_pinned_registry(&mut self) -> anyhow::Result<()> {
+        sync_pinned_window_registry(self.window.app_handle(), None)
+    }
+
+    fn focus(&mut self) -> anyhow::Result<()> {
+        self.window.set_focus().map_err(Into::into)
+    }
 }
 
 #[tauri::command]

@@ -1,4 +1,4 @@
-export type UserAction = "close" | "fold" | "unfold";
+export type UserAction = "close" | "fold" | "unfold" | "pin" | "unpin";
 
 export type UserActionOutcome =
   | { status: "succeeded" }
@@ -8,6 +8,7 @@ export type UserActionOutcome =
 interface SurfaceActionAdapter {
   close(): Promise<void>;
   setCollapsed(collapsed: boolean): Promise<void>;
+  setPinned(pinned: boolean): Promise<void>;
 }
 
 export interface UserActionWorkflow {
@@ -57,6 +58,12 @@ export function createUserActionWorkflow(
           case "unfold":
             await target.setCollapsed(false);
             return { status: "succeeded" };
+          case "pin":
+            await target.setPinned(true);
+            return { status: "succeeded" };
+          case "unpin":
+            await target.setPinned(false);
+            return { status: "succeeded" };
         }
       } catch (error) {
         return { status: "failed", message: failureMessage(error) };
@@ -71,6 +78,7 @@ export function createNoteActionAdapter(dependencies: {
   flushPendingContent(): Promise<unknown>;
   closeSurface(): Promise<unknown>;
   setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
+  setSurfacePinned(pinned: boolean): Promise<unknown>;
 }): SurfaceActionAdapter {
   return {
     async close() {
@@ -80,6 +88,10 @@ export function createNoteActionAdapter(dependencies: {
     async setCollapsed(collapsed) {
       await dependencies.flushPendingContent();
       await dependencies.setSurfaceCollapsed(collapsed);
+    },
+    async setPinned(pinned) {
+      await dependencies.flushPendingContent();
+      await dependencies.setSurfacePinned(pinned);
     },
   };
 }
@@ -87,6 +99,7 @@ export function createNoteActionAdapter(dependencies: {
 export function createTimerActionAdapter(dependencies: {
   closeSurface(): Promise<unknown>;
   setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
+  setSurfacePinned(pinned: boolean): Promise<unknown>;
 }): SurfaceActionAdapter {
   return {
     async close() {
@@ -94,6 +107,9 @@ export function createTimerActionAdapter(dependencies: {
     },
     async setCollapsed(collapsed) {
       await dependencies.setSurfaceCollapsed(collapsed);
+    },
+    async setPinned(pinned) {
+      await dependencies.setSurfacePinned(pinned);
     },
   };
 }
@@ -113,5 +129,7 @@ export function createUserActionInputAdapter(
     close: () => perform("close"),
     fold: () => perform("fold"),
     unfold: () => perform("unfold"),
+    pin: () => perform("pin"),
+    unpin: () => perform("unpin"),
   };
 }

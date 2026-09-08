@@ -25,6 +25,7 @@ mod settings;
 mod text_checking;
 mod timers;
 mod updater;
+mod user_action_workflow;
 mod windows;
 
 fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
