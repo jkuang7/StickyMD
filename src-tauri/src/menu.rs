@@ -7,12 +7,12 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_log::log;
 
 use crate::groups::{reset_window_positions, unlink_group_for_focused};
+use crate::native_user_action::NativeUserAction;
 use crate::save_load::save_settings;
 use crate::settings::MenuSettings;
 use crate::timers::create_timer_window;
 use crate::windows::{
-    create_sticky, cycle_focus, request_close_window, request_note_color,
-    request_note_font_size_change, request_note_snap, request_relink_windows, restore_all_notes,
+    create_sticky, cycle_focus, request_mapped_native_user_action, restore_all_notes,
     restore_last_closed, show_version_window, toggle_note_visibility, toggle_shortcuts_window,
     Direction,
 };
@@ -54,6 +54,36 @@ impl TryFrom<MenuId> for MenuCommand {
             "Could not deserialize {:?} into MenuCommand",
             value
         ))
+    }
+}
+
+impl MenuCommand {
+    fn user_action(self) -> anyhow::Result<NativeUserAction> {
+        const MENU_COLORS: [&str; 7] = [
+            "#fff9b1", "#81b7dd", "#65a65b", "#aad2ca", "#98c260", "#e1a1b1", "#b98cb3",
+        ];
+
+        match self {
+            Self::CloseWindow => Ok(NativeUserAction::Close),
+            Self::LinkWindowsOnThisSideBelowCurrent => Ok(NativeUserAction::Relink),
+            Self::IncreaseFontSize => Ok(NativeUserAction::ChangeFontSize { increase: true }),
+            Self::DecreaseFontSize => Ok(NativeUserAction::ChangeFontSize { increase: false }),
+            Self::Color(index) => Ok(NativeUserAction::SetColor {
+                color: MENU_COLORS
+                    .get(usize::from(index))
+                    .with_context(|| format!("Unknown note color {index}"))?
+                    .to_string(),
+            }),
+            Self::Snap(direction) => Ok(NativeUserAction::Snap {
+                direction,
+                partial: false,
+            }),
+            Self::PartialSnap(direction) => Ok(NativeUserAction::Snap {
+                direction,
+                partial: true,
+            }),
+            _ => anyhow::bail!("Menu command {self:?} is not a user action"),
+        }
     }
 }
 
@@ -313,19 +343,21 @@ pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
                 MenuCommand::NewNote => create_sticky(app).map(|_| ()),
                 MenuCommand::NewTimer => create_timer_window(app).map(|_| ()),
                 MenuCommand::ResetPositions => reset_window_positions(app),
-                MenuCommand::LinkWindowsOnThisSideBelowCurrent => request_relink_windows(app),
+                MenuCommand::LinkWindowsOnThisSideBelowCurrent
+                | MenuCommand::Snap(_)
+                | MenuCommand::PartialSnap(_)
+                | MenuCommand::CloseWindow
+                | MenuCommand::IncreaseFontSize
+                | MenuCommand::DecreaseFontSize
+                | MenuCommand::Color(_) => {
+                    request_mapped_native_user_action(app, command.user_action())
+                }
                 MenuCommand::UnlinkThisGroup => unlink_group_for_focused(app),
-                MenuCommand::Snap(direction) => request_note_snap(app, direction, false),
-                MenuCommand::PartialSnap(direction) => request_note_snap(app, direction, true),
-                MenuCommand::CloseWindow => request_close_window(app),
                 MenuCommand::ReopenClosedNote => restore_last_closed(app),
                 MenuCommand::RestoreAllNotes => restore_all_notes(app),
                 MenuCommand::ToggleNoteVisibility => toggle_note_visibility(app),
                 MenuCommand::NextNote => cycle_focus(app, false),
                 MenuCommand::PrevNote => cycle_focus(app, true),
-                MenuCommand::IncreaseFontSize => request_note_font_size_change(app, true),
-                MenuCommand::DecreaseFontSize => request_note_font_size_change(app, false),
-                MenuCommand::Color(index) => request_note_color(app, index),
                 MenuCommand::BringToFront => save_settings(app),
                 MenuCommand::AutoStart => apply_autostart_preference(app),
                 MenuCommand::ToggleShortcuts => toggle_shortcuts_window(app),
@@ -377,4 +409,65 @@ fn apply_autostart_preference(app: &AppHandle) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_menu_items_and_accelerators_map_to_the_production_action_contract() {
+        let cases = [
+            (MenuCommand::CloseWindow, NativeUserAction::Close),
+            (
+                MenuCommand::LinkWindowsOnThisSideBelowCurrent,
+                NativeUserAction::Relink,
+            ),
+            (
+                MenuCommand::IncreaseFontSize,
+                NativeUserAction::ChangeFontSize { increase: true },
+            ),
+            (
+                MenuCommand::DecreaseFontSize,
+                NativeUserAction::ChangeFontSize { increase: false },
+            ),
+            (
+                MenuCommand::Color(1),
+                NativeUserAction::SetColor {
+                    color: "#81b7dd".into(),
+                },
+            ),
+            (
+                MenuCommand::Snap(Direction::Down),
+                NativeUserAction::Snap {
+                    direction: Direction::Down,
+                    partial: false,
+                },
+            ),
+            (
+                MenuCommand::PartialSnap(Direction::Right),
+                NativeUserAction::Snap {
+                    direction: Direction::Right,
+                    partial: true,
+                },
+            ),
+        ];
+
+        for (command, expected) in cases {
+            let encoded: MenuId = command.into();
+            let decoded = MenuCommand::try_from(encoded).unwrap();
+            assert_eq!(decoded.user_action().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn invalid_color_payload_is_a_coherent_mapping_failure() {
+        assert_eq!(
+            MenuCommand::Color(99)
+                .user_action()
+                .unwrap_err()
+                .to_string(),
+            "Unknown note color 99"
+        );
+    }
 }

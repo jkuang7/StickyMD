@@ -17,7 +17,7 @@ export type UserActionOutcome =
   | { status: "busy"; message: string }
   | { status: "failed"; message: string };
 
-interface SurfaceActionAdapter {
+export interface SurfaceActionAdapter {
   close(): Promise<void>;
   setCollapsed(collapsed: boolean): Promise<void>;
   setPinned(pinned: boolean): Promise<void>;
@@ -31,7 +31,7 @@ export interface UserActionWorkflow {
   perform(action: UserAction): Promise<UserActionOutcome>;
 }
 
-type ResolveTarget = () =>
+export type ResolveTarget = () =>
   | SurfaceActionAdapter
   | undefined
   | Promise<SurfaceActionAdapter | undefined>;
@@ -200,6 +200,7 @@ export function createUserActionInputAdapter(
   }
 
   return {
+    perform,
     close: () => perform("close"),
     fold: () => perform("fold"),
     unfold: () => perform("unfold"),
@@ -213,3 +214,77 @@ export function createUserActionInputAdapter(
       perform({ type: "snap", direction, partial }),
   };
 }
+
+export const USER_ACTION_REQUEST_EVENT = "user_action_requested";
+
+export interface NoteActionDependencies {
+  flushPendingContent(color?: string): Promise<unknown>;
+  closeSurface(): Promise<unknown>;
+  setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
+  setSurfacePinned(pinned: boolean): Promise<unknown>;
+  relinkSurface(): Promise<unknown>;
+  setSurfaceColor(color: string): Promise<unknown>;
+  changeSurfaceFontSize(increase: boolean): Promise<unknown>;
+  snapSurface(direction: SnapDirection, partial: boolean): Promise<unknown>;
+}
+
+export interface TimerActionDependencies {
+  closeSurface(): Promise<unknown>;
+  setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
+  setSurfacePinned(pinned: boolean): Promise<unknown>;
+  relinkSurface(): Promise<unknown>;
+}
+
+type DependencyResolver<T> = T | (() => T | undefined | Promise<T | undefined>);
+type ConfirmRelink = (message: string) => Promise<boolean>;
+type RenderOutcome = (outcome: UserActionOutcome) => void;
+
+function resolve<T>(dependencies: DependencyResolver<T>) {
+  return typeof dependencies === "function"
+    ? (dependencies as () => T | undefined | Promise<T | undefined>)()
+    : dependencies;
+}
+
+/** Compose the exact workflow and note adapter used by production callers. */
+export function createNoteUserActionInput(
+  dependencies: DependencyResolver<NoteActionDependencies>,
+  confirmRelink: ConfirmRelink,
+  render: RenderOutcome,
+) {
+  const workflow = createUserActionWorkflow(async () => {
+    const target = await resolve(dependencies);
+    return target ? createNoteActionAdapter(target) : undefined;
+  }, confirmRelink);
+  return createUserActionInputAdapter(workflow, render);
+}
+
+/** Compose the exact workflow and timer adapter used by production callers. */
+export function createTimerUserActionInput(
+  dependencies: DependencyResolver<TimerActionDependencies>,
+  confirmRelink: ConfirmRelink,
+  render: RenderOutcome,
+) {
+  const workflow = createUserActionWorkflow(async () => {
+    const target = await resolve(dependencies);
+    return target ? createTimerActionAdapter(target) : undefined;
+  }, confirmRelink);
+  return createUserActionInputAdapter(workflow, render);
+}
+
+interface UserActionEventTarget {
+  listen<T>(
+    event: string,
+    handler: (event: Event<T>) => void | Promise<void>,
+  ): Promise<() => void>;
+}
+
+/** Route native menu items and their accelerators through the production seam. */
+export function registerUserActionRequestListener(
+  target: UserActionEventTarget,
+  input: ReturnType<typeof createUserActionInputAdapter>,
+) {
+  return target.listen<UserAction>(USER_ACTION_REQUEST_EVENT, async (event) => {
+    await input.perform(event.payload);
+  });
+}
+import type { Event } from "@tauri-apps/api/event";

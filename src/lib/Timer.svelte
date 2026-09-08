@@ -7,9 +7,8 @@
 
   import Icon from "$lib/Icon.svelte";
   import {
-    createTimerActionAdapter,
-    createUserActionInputAdapter,
-    createUserActionWorkflow,
+    createTimerUserActionInput,
+    registerUserActionRequestListener,
   } from "$lib/userActionWorkflow";
 
   interface TimerSnapshot {
@@ -309,9 +308,8 @@
     return outcome;
   }
 
-  const userActionWorkflow = createUserActionWorkflow(
-    () =>
-      createTimerActionAdapter({
+  const userActionInput = createTimerUserActionInput(
+    {
         closeSurface: () => invoke("close_window"),
         setSurfaceCollapsed: (next) =>
           invoke("set_collapsed", { collapsed: next }),
@@ -319,11 +317,8 @@
           invoke("set_timer_always_on_top", { alwaysOnTop: next }),
         relinkSurface: () =>
           invoke("link_windows_on_this_side_below_current_window"),
-      }),
+    },
     (message) => confirm(message),
-  );
-  const userActionInput = createUserActionInputAdapter(
-    userActionWorkflow,
     (outcome) => {
       errorMessage =
         outcome.status === "failed" || outcome.status === "busy"
@@ -390,10 +385,7 @@
       await appWindow.listen("tauri://move", () => {
         void invoke("save_geometry");
       }),
-      await appWindow.listen("user_action_close_requested", () => closeTimer()),
-      await appWindow.listen("user_action_relink_requested", () =>
-        userActionInput.relink(),
-      ),
+      await registerUserActionRequestListener(appWindow, userActionInput),
     );
   });
 

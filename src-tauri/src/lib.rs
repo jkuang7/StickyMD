@@ -19,6 +19,7 @@ use crate::windows::{focus_existing_or_create, GeometryIndex, NoteVisibility};
 mod commands;
 mod groups;
 mod menu;
+mod native_user_action;
 mod pinned_windows;
 mod save_load;
 mod settings;

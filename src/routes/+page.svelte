@@ -17,10 +17,8 @@
   import Timer from "$lib/Timer.svelte";
   import Version from "$lib/Version.svelte";
   import {
-    createNoteActionAdapter,
-    createUserActionInputAdapter,
-    createUserActionWorkflow,
-    type SnapDirection,
+    createNoteUserActionInput,
+    registerUserActionRequestListener,
   } from "$lib/userActionWorkflow";
 
   interface StickyInit {
@@ -37,11 +35,6 @@
     alarm_at_ms: number;
     always_on_top: boolean;
     collapsed: boolean;
-  }
-
-  interface SnapRequest {
-    direction: SnapDirection;
-    partial: boolean;
   }
 
   const colors = [
@@ -100,9 +93,8 @@
     return outcome;
   }
 
-  const userActionWorkflow = createUserActionWorkflow(
-    () =>
-      createNoteActionAdapter({
+  const userActionInput = createNoteUserActionInput(
+    {
         async flushPendingContent(color) {
           if (!editor) throw new Error("The note editor is not ready");
           await editor.flushSave(color);
@@ -131,11 +123,8 @@
           invoke("change_font_size", { increase }),
         snapSurface: (direction, partial) =>
           invoke("snap_window", { direction, partial }),
-      }),
+    },
     (message) => confirm(message),
-  );
-  const userActionInput = createUserActionInputAdapter(
-    userActionWorkflow,
     (outcome) => {
       actionError =
         outcome.status === "failed" || outcome.status === "busy"
@@ -286,16 +275,7 @@
         // and then deliver their transcript by sending Command+V.
         await editor?.flushSave();
       }),
-      await appWindow.listen<number>("user_action_set_color_requested", (event) =>
-        userActionInput.setColor(colors[event.payload]),
-      ),
-      await appWindow.listen<boolean>(
-        "user_action_change_font_size_requested",
-        (event) => userActionInput.changeFontSize(event.payload),
-      ),
-      await appWindow.listen<SnapRequest>("user_action_snap_requested", (event) =>
-        userActionInput.snap(event.payload.direction, event.payload.partial),
-      ),
+      await registerUserActionRequestListener(appWindow, userActionInput),
       await appWindow.listen<number>("set_font_size", (event) => {
         const previousFontSize = fontSize;
         const increased = event.payload > fontSize;
@@ -344,10 +324,6 @@
           });
         }
       }),
-      await appWindow.listen("user_action_close_requested", () => closeNote()),
-      await appWindow.listen("user_action_relink_requested", () =>
-        userActionInput.relink(),
-      ),
       await appWindow.listen("tauri://move", saveGeometryDebounced),
       await appWindow.listen("tauri://resize", saveGeometryDebounced),
     );
