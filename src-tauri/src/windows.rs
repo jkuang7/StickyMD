@@ -278,15 +278,15 @@ fn window_overlap(start_1: i32, len_1: i32, start_2: i32, len_2: i32) -> bool {
     overlap_end - overlap_start > GAP
 }
 
-pub fn snap_window(
+pub fn snap_note_window(
     app: &AppHandle,
+    window: &WebviewWindow,
     direction: Direction,
     partial: bool,
 ) -> Result<(), anyhow::Error> {
     log::debug!("Snapping window {:?}", direction);
 
-    let window = get_focused_window(app).context("No window currently focused")?;
-    let (window_position, window_size) = get_position_and_size(&window)?;
+    let (window_position, window_size) = get_position_and_size(window)?;
     let id = note_id_from_label(window.label())?;
     let geometries = app.state::<GeometryIndex>();
 
@@ -323,7 +323,7 @@ pub fn snap_window(
     let other_windows = app
         .webview_windows()
         .into_iter()
-        .filter(|(_, wind)| *wind != window)
+        .filter(|(_, wind)| wind != window)
         .filter_map(|(_, wind)| get_position_and_size(&wind).ok());
 
     let viable_edges: Box<dyn Iterator<Item = i32>> =
@@ -628,6 +628,56 @@ pub fn request_relink_windows(app: &AppHandle) -> Result<(), anyhow::Error> {
     request_focused_surface_action(app, "user_action_relink_requested")
 }
 
+pub fn request_note_color(app: &AppHandle, index: u8) -> Result<(), anyhow::Error> {
+    request_focused_note_action(app, "user_action_set_color_requested", index)
+}
+
+pub fn request_note_font_size_change(app: &AppHandle, increase: bool) -> Result<(), anyhow::Error> {
+    request_focused_note_action(app, "user_action_change_font_size_requested", increase)
+}
+
+#[derive(Clone, serde::Serialize)]
+struct SnapRequest {
+    direction: Direction,
+    partial: bool,
+}
+
+pub fn request_note_snap(
+    app: &AppHandle,
+    direction: Direction,
+    partial: bool,
+) -> Result<(), anyhow::Error> {
+    request_focused_note_action(
+        app,
+        "user_action_snap_requested",
+        SnapRequest { direction, partial },
+    )
+}
+
+fn request_focused_note_action(
+    app: &AppHandle,
+    event: &'static str,
+    payload: impl Clone + serde::Serialize,
+) -> Result<(), anyhow::Error> {
+    let mut focused = None;
+    for (label, window) in app.webview_windows() {
+        if window
+            .is_focused()
+            .with_context(|| format!("Could not inspect focus for {label}"))?
+        {
+            focused = Some(window);
+            break;
+        }
+    }
+    let target = focused.context("No window is currently focused")?;
+    if !target.label().starts_with("sticky_") {
+        anyhow::bail!("The focused surface is not a note");
+    }
+
+    target.emit_to(EventTarget::webview_window(target.label()), event, payload)?;
+    Ok(())
+}
+
 fn request_focused_surface_action(
     app: &AppHandle,
     event: &'static str,
@@ -870,20 +920,6 @@ pub fn cycle_focus(app: &AppHandle, reverse: bool) -> Result<(), anyhow::Error> 
         .context("Could not focus window")
 }
 
-pub fn set_color(app: &AppHandle, index: u8) -> Result<(), anyhow::Error> {
-    app.webview_windows()
-        .into_iter()
-        .filter(|(label, _)| label.starts_with("sticky_"))
-        .for_each(|(label, window)| {
-            if window.is_focused().unwrap_or(false) {
-                log::info!("emitting set color to window {}", label);
-                let _ = window.emit_to(EventTarget::webview_window(label), "set_color", index);
-            }
-        });
-
-    Ok(())
-}
-
 pub fn change_note_font_size(
     app: &AppHandle,
     window: &WebviewWindow,
@@ -934,9 +970,4 @@ pub fn change_note_font_size(
         font_size,
     )?;
     Ok(())
-}
-
-pub fn change_focused_note_font_size(app: &AppHandle, increase: bool) -> Result<(), anyhow::Error> {
-    let window = get_focused_window(app).context("No note currently focused")?;
-    change_note_font_size(app, &window, increase)
 }

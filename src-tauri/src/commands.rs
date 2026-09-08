@@ -13,7 +13,10 @@ use crate::{
     save_load::{note_id_from_label, NoteRepository},
     settings::MenuSettings,
     user_action_workflow::{PinTarget, PinWorkflow},
-    windows::{apply_window_pin_state, change_note_font_size, create_sticky, sorted_windows},
+    windows::{
+        apply_window_pin_state, change_note_font_size, create_sticky,
+        snap_note_window as snap_target_note_window, sorted_windows, Direction,
+    },
 };
 
 const LEFT_MOUSE_BUTTON_MASK: usize = 1;
@@ -197,6 +200,16 @@ pub fn change_font_size(
     increase: bool,
 ) -> Result<(), String> {
     change_note_font_size(&app, &window, increase).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn snap_window(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    direction: Direction,
+    partial: bool,
+) -> Result<(), String> {
+    snap_target_note_window(&app, &window, direction, partial).map_err(|error| error.to_string())
 }
 
 #[tauri::command]

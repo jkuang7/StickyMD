@@ -20,6 +20,7 @@
     createNoteActionAdapter,
     createUserActionInputAdapter,
     createUserActionWorkflow,
+    type SnapDirection,
   } from "$lib/userActionWorkflow";
 
   interface StickyInit {
@@ -36,6 +37,11 @@
     alarm_at_ms: number;
     always_on_top: boolean;
     collapsed: boolean;
+  }
+
+  interface SnapRequest {
+    direction: SnapDirection;
+    partial: boolean;
   }
 
   const colors = [
@@ -97,9 +103,9 @@
   const userActionWorkflow = createUserActionWorkflow(
     () =>
       createNoteActionAdapter({
-        async flushPendingContent() {
+        async flushPendingContent(color) {
           if (!editor) throw new Error("The note editor is not ready");
-          await editor.flushSave();
+          await editor.flushSave(color);
         },
         closeSurface: () => invoke("close_window"),
         async setSurfaceCollapsed(next) {
@@ -117,6 +123,14 @@
           invoke("set_note_always_on_top", { alwaysOnTop: next }),
         relinkSurface: () =>
           invoke("link_windows_on_this_side_below_current_window"),
+        async setSurfaceColor(color) {
+          document.body.style.backgroundColor = color;
+          colorMenuOpen = false;
+        },
+        changeSurfaceFontSize: (increase) =>
+          invoke("change_font_size", { increase }),
+        snapSurface: (direction, partial) =>
+          invoke("snap_window", { direction, partial }),
       }),
     (message) => confirm(message),
   );
@@ -157,11 +171,6 @@
 
   function toggleColorMenu() {
     colorMenuOpen = !colorMenuOpen;
-  }
-
-  async function setColor(color: string) {
-    document.body.style.backgroundColor = color;
-    await editor?.flushSave();
   }
 
   function cancelGeometrySettlement() {
@@ -226,7 +235,7 @@
     ) {
       event.preventDefault();
       event.stopPropagation();
-      void invoke("change_font_size", { increase: event.code === "Equal" });
+      void userActionInput.changeFontSize(event.code === "Equal");
     }
   }
 
@@ -277,9 +286,16 @@
         // and then deliver their transcript by sending Command+V.
         await editor?.flushSave();
       }),
-      await appWindow.listen<number>("set_color", async (event) => {
-        await setColor(colors[event.payload]);
-      }),
+      await appWindow.listen<number>("user_action_set_color_requested", (event) =>
+        userActionInput.setColor(colors[event.payload]),
+      ),
+      await appWindow.listen<boolean>(
+        "user_action_change_font_size_requested",
+        (event) => userActionInput.changeFontSize(event.payload),
+      ),
+      await appWindow.listen<SnapRequest>("user_action_snap_requested", (event) =>
+        userActionInput.snap(event.payload.direction, event.payload.partial),
+      ),
       await appWindow.listen<number>("set_font_size", (event) => {
         const previousFontSize = fontSize;
         const increased = event.payload > fontSize;
@@ -426,7 +442,7 @@
           class="color"
           onclick={(event) => {
             event.stopPropagation();
-            void setColor(color);
+            void userActionInput.setColor(color);
           }}
           aria-label={`set note color ${color}`}
           style:background={color}

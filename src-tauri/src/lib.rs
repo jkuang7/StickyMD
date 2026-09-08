@@ -145,6 +145,7 @@ pub fn run() {
             link_windows_on_this_side_below_current_window,
             resize_note_height,
             change_font_size,
+            snap_window,
             create_note,
             timers::timer_pause,
             timers::timer_resume,

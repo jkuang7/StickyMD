@@ -11,9 +11,10 @@ use crate::save_load::save_settings;
 use crate::settings::MenuSettings;
 use crate::timers::create_timer_window;
 use crate::windows::{
-    change_focused_note_font_size, create_sticky, cycle_focus, request_close_window,
-    request_relink_windows, restore_all_notes, restore_last_closed, set_color, show_version_window,
-    snap_window, toggle_note_visibility, toggle_shortcuts_window, Direction,
+    create_sticky, cycle_focus, request_close_window, request_note_color,
+    request_note_font_size_change, request_note_snap, request_relink_windows, restore_all_notes,
+    restore_last_closed, show_version_window, toggle_note_visibility, toggle_shortcuts_window,
+    Direction,
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
@@ -314,17 +315,17 @@ pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
                 MenuCommand::ResetPositions => reset_window_positions(app),
                 MenuCommand::LinkWindowsOnThisSideBelowCurrent => request_relink_windows(app),
                 MenuCommand::UnlinkThisGroup => unlink_group_for_focused(app),
-                MenuCommand::Snap(direction) => snap_window(app, direction, false),
-                MenuCommand::PartialSnap(direction) => snap_window(app, direction, true),
+                MenuCommand::Snap(direction) => request_note_snap(app, direction, false),
+                MenuCommand::PartialSnap(direction) => request_note_snap(app, direction, true),
                 MenuCommand::CloseWindow => request_close_window(app),
                 MenuCommand::ReopenClosedNote => restore_last_closed(app),
                 MenuCommand::RestoreAllNotes => restore_all_notes(app),
                 MenuCommand::ToggleNoteVisibility => toggle_note_visibility(app),
                 MenuCommand::NextNote => cycle_focus(app, false),
                 MenuCommand::PrevNote => cycle_focus(app, true),
-                MenuCommand::IncreaseFontSize => change_focused_note_font_size(app, true),
-                MenuCommand::DecreaseFontSize => change_focused_note_font_size(app, false),
-                MenuCommand::Color(index) => set_color(app, index),
+                MenuCommand::IncreaseFontSize => request_note_font_size_change(app, true),
+                MenuCommand::DecreaseFontSize => request_note_font_size_change(app, false),
+                MenuCommand::Color(index) => request_note_color(app, index),
                 MenuCommand::BringToFront => save_settings(app),
                 MenuCommand::AutoStart => apply_autostart_preference(app),
                 MenuCommand::ToggleShortcuts => toggle_shortcuts_window(app),

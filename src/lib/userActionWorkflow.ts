@@ -4,7 +4,12 @@ export type UserAction =
   | "unfold"
   | "pin"
   | "unpin"
-  | "relink";
+  | "relink"
+  | { type: "set-color"; color: string }
+  | { type: "change-font-size"; increase: boolean }
+  | { type: "snap"; direction: SnapDirection; partial: boolean };
+
+export type SnapDirection = "Up" | "Down" | "Left" | "Right";
 
 export type UserActionOutcome =
   | { status: "succeeded" }
@@ -17,6 +22,9 @@ interface SurfaceActionAdapter {
   setCollapsed(collapsed: boolean): Promise<void>;
   setPinned(pinned: boolean): Promise<void>;
   relink(): Promise<void>;
+  setColor(color: string): Promise<void>;
+  changeFontSize(increase: boolean): Promise<void>;
+  snap(direction: SnapDirection, partial: boolean): Promise<void>;
 }
 
 export interface UserActionWorkflow {
@@ -61,6 +69,20 @@ export function createUserActionWorkflow(
         const target = await resolveTarget();
         if (!target) throw new Error("No valid note or timer target");
 
+        if (typeof action !== "string") {
+          switch (action.type) {
+            case "set-color":
+              await target.setColor(action.color);
+              return { status: "succeeded" };
+            case "change-font-size":
+              await target.changeFontSize(action.increase);
+              return { status: "succeeded" };
+            case "snap":
+              await target.snap(action.direction, action.partial);
+              return { status: "succeeded" };
+          }
+        }
+
         switch (action) {
           case "close":
             await target.close();
@@ -94,11 +116,14 @@ export function createUserActionWorkflow(
 }
 
 export function createNoteActionAdapter(dependencies: {
-  flushPendingContent(): Promise<unknown>;
+  flushPendingContent(color?: string): Promise<unknown>;
   closeSurface(): Promise<unknown>;
   setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
   setSurfacePinned(pinned: boolean): Promise<unknown>;
   relinkSurface(): Promise<unknown>;
+  setSurfaceColor(color: string): Promise<unknown>;
+  changeSurfaceFontSize(increase: boolean): Promise<unknown>;
+  snapSurface(direction: SnapDirection, partial: boolean): Promise<unknown>;
 }): SurfaceActionAdapter {
   return {
     async close() {
@@ -116,6 +141,18 @@ export function createNoteActionAdapter(dependencies: {
     async relink() {
       await dependencies.flushPendingContent();
       await dependencies.relinkSurface();
+    },
+    async setColor(color) {
+      await dependencies.flushPendingContent(color);
+      await dependencies.setSurfaceColor(color);
+    },
+    async changeFontSize(increase) {
+      await dependencies.flushPendingContent();
+      await dependencies.changeSurfaceFontSize(increase);
+    },
+    async snap(direction, partial) {
+      await dependencies.flushPendingContent();
+      await dependencies.snapSurface(direction, partial);
     },
   };
 }
@@ -139,6 +176,15 @@ export function createTimerActionAdapter(dependencies: {
     async relink() {
       await dependencies.relinkSurface();
     },
+    async setColor() {
+      throw new Error("The focused surface is not a note");
+    },
+    async changeFontSize() {
+      throw new Error("The focused surface is not a note");
+    },
+    async snap() {
+      throw new Error("The focused surface is not a note");
+    },
   };
 }
 
@@ -160,5 +206,10 @@ export function createUserActionInputAdapter(
     pin: () => perform("pin"),
     unpin: () => perform("unpin"),
     relink: () => perform("relink"),
+    setColor: (color: string) => perform({ type: "set-color", color }),
+    changeFontSize: (increase: boolean) =>
+      perform({ type: "change-font-size", increase }),
+    snap: (direction: SnapDirection, partial: boolean) =>
+      perform({ type: "snap", direction, partial }),
   };
 }

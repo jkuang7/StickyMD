@@ -525,3 +525,229 @@ test("the shared input adapter routes relink success, cancellation, and failure"
   assert.deepEqual(actions, ["relink", "relink", "relink"]);
   assert.deepEqual(rendered, outcomes);
 });
+
+test("note color saves the selected color and current document before displaying it", async () => {
+  const events: string[] = [];
+  const target = createNoteActionAdapter({
+    flushPendingContent: async (color) =>
+      events.push(`save current document with ${color}`),
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => undefined,
+    setSurfaceColor: async (color) => events.push(`display ${color}`),
+    changeSurfaceFontSize: async () => undefined,
+    snapSurface: async () => undefined,
+  });
+  const workflow = createUserActionWorkflow(() => target);
+
+  assert.deepEqual(
+    await workflow.perform({ type: "set-color", color: "#81b7dd" }),
+    { status: "succeeded" },
+  );
+  assert.deepEqual(events, [
+    "save current document with #81b7dd",
+    "display #81b7dd",
+  ]);
+});
+
+test("failed color persistence leaves the displayed color unchanged", async () => {
+  const displayed: string[] = [];
+  const target = createNoteActionAdapter({
+    flushPendingContent: async () => {
+      throw new Error("save unavailable");
+    },
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => undefined,
+    setSurfaceColor: async (color) => displayed.push(color),
+    changeSurfaceFontSize: async () => undefined,
+    snapSurface: async () => undefined,
+  });
+  const workflow = createUserActionWorkflow(() => target);
+
+  assert.deepEqual(
+    await workflow.perform({ type: "set-color", color: "#81b7dd" }),
+    { status: "failed", message: "save unavailable" },
+  );
+  assert.deepEqual(displayed, []);
+});
+
+test("note font-size and snap actions flush before durable or native mutation", async () => {
+  const events: string[] = [];
+  const target = createNoteActionAdapter({
+    flushPendingContent: async () => events.push("flush"),
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => undefined,
+    setSurfaceColor: async () => undefined,
+    changeSurfaceFontSize: async (increase) =>
+      events.push(increase ? "font up" : "font down"),
+    snapSurface: async (direction, partial) =>
+      events.push(`${partial ? "partial" : "full"} ${direction}`),
+  });
+  const workflow = createUserActionWorkflow(() => target);
+
+  assert.deepEqual(
+    await workflow.perform({ type: "change-font-size", increase: true }),
+    { status: "succeeded" },
+  );
+  assert.deepEqual(
+    await workflow.perform({ type: "snap", direction: "Left", partial: false }),
+    { status: "succeeded" },
+  );
+  assert.deepEqual(
+    await workflow.perform({ type: "snap", direction: "Down", partial: true }),
+    { status: "succeeded" },
+  );
+  assert.deepEqual(events, [
+    "flush",
+    "font up",
+    "flush",
+    "full Left",
+    "flush",
+    "partial Down",
+  ]);
+});
+
+test("a failed note save prevents font-size and snap mutation", async () => {
+  const mutations: string[] = [];
+  const target = createNoteActionAdapter({
+    flushPendingContent: async () => {
+      throw new Error("save unavailable");
+    },
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => undefined,
+    setSurfaceColor: async () => undefined,
+    changeSurfaceFontSize: async () => mutations.push("font"),
+    snapSurface: async () => mutations.push("snap"),
+  });
+  const workflow = createUserActionWorkflow(() => target);
+
+  for (const action of [
+    { type: "change-font-size", increase: false },
+    { type: "snap", direction: "Up", partial: false },
+  ]) {
+    assert.deepEqual(await workflow.perform(action), {
+      status: "failed",
+      message: "save unavailable",
+    });
+  }
+  assert.deepEqual(mutations, []);
+});
+
+test("note-only actions reject timer targets through the workflow seam", async () => {
+  const mutations: string[] = [];
+  const target = createTimerActionAdapter({
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => undefined,
+  });
+  const workflow = createUserActionWorkflow(() => target);
+
+  for (const action of [
+    { type: "set-color", color: "#81b7dd" },
+    { type: "change-font-size", increase: true },
+    { type: "snap", direction: "Right", partial: true },
+  ]) {
+    assert.deepEqual(await workflow.perform(action), {
+      status: "failed",
+      message: "The focused surface is not a note",
+    });
+  }
+  assert.deepEqual(mutations, []);
+});
+
+test("note-only actions reject utility or missing targets before saving", async () => {
+  let resolutions = 0;
+  const workflow = createUserActionWorkflow(() => {
+    resolutions += 1;
+    return undefined;
+  });
+
+  assert.deepEqual(
+    await workflow.perform({ type: "set-color", color: "#81b7dd" }),
+    { status: "failed", message: "No valid note or timer target" },
+  );
+  assert.equal(resolutions, 1);
+});
+
+test("note-only actions retain the resolved target while saving", async () => {
+  const events: string[] = [];
+  let releaseSave!: () => void;
+  const first = createNoteActionAdapter({
+    flushPendingContent: () =>
+      new Promise<void>((resolve) => {
+        events.push("first save");
+        releaseSave = resolve;
+      }),
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => undefined,
+    setSurfaceColor: async () => undefined,
+    changeSurfaceFontSize: async () => events.push("first font"),
+    snapSurface: async () => undefined,
+  });
+  const second = createNoteActionAdapter({
+    flushPendingContent: async () => events.push("second save"),
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => undefined,
+    setSurfaceColor: async () => undefined,
+    changeSurfaceFontSize: async () => events.push("second font"),
+    snapSurface: async () => undefined,
+  });
+  let focused = first;
+  let resolutions = 0;
+  const workflow = createUserActionWorkflow(() => {
+    resolutions += 1;
+    return focused;
+  });
+
+  const action = workflow.perform({ type: "change-font-size", increase: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  focused = second;
+  assert.deepEqual(
+    await workflow.perform({ type: "snap", direction: "Left", partial: false }),
+    { status: "busy", message: "Another user action is already running" },
+  );
+  releaseSave();
+
+  assert.deepEqual(await action, { status: "succeeded" });
+  assert.equal(resolutions, 1);
+  assert.deepEqual(events, ["first save", "first font"]);
+});
+
+test("the shared input adapter maps color, font-size, and both snap variants", async () => {
+  const actions: unknown[] = [];
+  const rendered: unknown[] = [];
+  const workflow = {
+    async perform(action) {
+      actions.push(action);
+      return { status: "succeeded" };
+    },
+  };
+  const adapter = createUserActionInputAdapter(workflow, (outcome) =>
+    rendered.push(outcome),
+  );
+
+  await adapter.setColor("#65a65b");
+  await adapter.changeFontSize(false);
+  await adapter.snap("Up", false);
+  await adapter.snap("Right", true);
+
+  assert.deepEqual(actions, [
+    { type: "set-color", color: "#65a65b" },
+    { type: "change-font-size", increase: false },
+    { type: "snap", direction: "Up", partial: false },
+    { type: "snap", direction: "Right", partial: true },
+  ]);
+  assert.deepEqual(rendered, Array(4).fill({ status: "succeeded" }));
+});

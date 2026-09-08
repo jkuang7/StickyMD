@@ -115,7 +115,7 @@
     saveTimeout = window.setTimeout(() => void flushSave(), delay);
   }
 
-  export async function flushSave() {
+  export async function flushSave(colorOverride?: string) {
     if (saveTimeout !== undefined) {
       window.clearTimeout(saveTimeout);
       saveTimeout = undefined;
@@ -123,7 +123,7 @@
     if (!editor) throw new Error("The note editor is not ready");
 
     const snapshot = editor.getJSON();
-    const color = document.body.style.backgroundColor;
+    const color = colorOverride ?? document.body.style.backgroundColor;
     const save = saveChain
       .catch(() => undefined)
       .then(async () => {
