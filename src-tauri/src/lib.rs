@@ -19,12 +19,14 @@ use crate::windows::{focus_existing_or_create, GeometryIndex, NoteVisibility};
 mod commands;
 mod groups;
 mod menu;
+mod native_user_action;
 mod pinned_windows;
 mod save_load;
 mod settings;
 mod text_checking;
 mod timers;
 mod updater;
+mod user_action_workflow;
 mod windows;
 
 fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
@@ -144,6 +146,7 @@ pub fn run() {
             link_windows_on_this_side_below_current_window,
             resize_note_height,
             change_font_size,
+            snap_window,
             create_note,
             timers::timer_pause,
             timers::timer_resume,
@@ -198,6 +201,7 @@ pub fn run() {
                     }
                 }
             }
+            #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
                 if let Err(error) = focus_existing_or_create(app) {
                     log::error!("Could not reopen notes from the Dock: {error:#}");

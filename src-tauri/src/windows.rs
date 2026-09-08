@@ -8,8 +8,13 @@ use tauri::{
     AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, PhysicalPosition,
     PhysicalSize, WebviewWindow, WindowEvent,
 };
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_log::log;
 
+use crate::native_user_action::{
+    dispatch_native_user_action, FocusedSurface, NativeUserAction, NativeUserActionTransport,
+    SurfaceKind, UserActionOutcome, USER_ACTION_REQUEST_EVENT,
+};
 use crate::pinned_windows::sync_pinned_window_registry;
 use crate::save_load::{note_id_from_label, save_settings, NoteRepository, StoredNote};
 use crate::settings::{
@@ -239,7 +244,7 @@ fn nearest_free_position(
     ))
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Up,
     Down,
@@ -278,15 +283,15 @@ fn window_overlap(start_1: i32, len_1: i32, start_2: i32, len_2: i32) -> bool {
     overlap_end - overlap_start > GAP
 }
 
-pub fn snap_window(
+pub fn snap_note_window(
     app: &AppHandle,
+    window: &WebviewWindow,
     direction: Direction,
     partial: bool,
 ) -> Result<(), anyhow::Error> {
     log::debug!("Snapping window {:?}", direction);
 
-    let window = get_focused_window(app).context("No window currently focused")?;
-    let (window_position, window_size) = get_position_and_size(&window)?;
+    let (window_position, window_size) = get_position_and_size(window)?;
     let id = note_id_from_label(window.label())?;
     let geometries = app.state::<GeometryIndex>();
 
@@ -323,7 +328,7 @@ pub fn snap_window(
     let other_windows = app
         .webview_windows()
         .into_iter()
-        .filter(|(_, wind)| *wind != window)
+        .filter(|(_, wind)| wind != window)
         .filter_map(|(_, wind)| get_position_and_size(&wind).ok());
 
     let viable_edges: Box<dyn Iterator<Item = i32>> =
@@ -612,33 +617,92 @@ pub fn open_sticky(app: &AppHandle, note: &StoredNote) -> Result<WebviewWindow, 
     Ok(window)
 }
 
-pub fn request_close_window(app: &AppHandle) -> Result<(), anyhow::Error> {
-    for label in [SHORTCUTS_WINDOW_LABEL, VERSION_WINDOW_LABEL] {
-        if let Some(window) = app.get_webview_window(label) {
-            if window.is_focused()? {
-                window.close()?;
-                return Ok(());
+struct AppNativeUserActionTransport<'a> {
+    app: &'a AppHandle,
+}
+
+impl NativeUserActionTransport for AppNativeUserActionTransport<'_> {
+    fn resolve_focused(&mut self) -> anyhow::Result<FocusedSurface> {
+        for (label, window) in self.app.webview_windows() {
+            if window
+                .is_focused()
+                .with_context(|| format!("Could not inspect focus for {label}"))?
+            {
+                let kind = if label.starts_with("sticky_") {
+                    SurfaceKind::Note
+                } else if label.starts_with("timer_") {
+                    SurfaceKind::Timer
+                } else {
+                    SurfaceKind::Utility
+                };
+                return Ok(FocusedSurface { label, kind });
             }
         }
+        anyhow::bail!("No window is currently focused")
     }
-    if let Some(window) = app
-        .webview_windows()
-        .into_iter()
-        .find_map(|(label, window)| {
-            (label.starts_with("timer_") && window.is_focused().unwrap_or(false)).then_some(window)
-        })
-    {
-        return crate::groups::close_window(&window);
+
+    fn emit(&mut self, target: &FocusedSurface, action: &NativeUserAction) -> anyhow::Result<()> {
+        let window = self
+            .app
+            .get_webview_window(&target.label)
+            .with_context(|| format!("The resolved surface {} is no longer open", target.label))?;
+        window
+            .emit_to(
+                EventTarget::webview_window(&target.label),
+                USER_ACTION_REQUEST_EVENT,
+                action,
+            )
+            .context("Could not deliver the user action")
     }
-    if let Some(window) = get_focused_window(app) {
-        window.emit_to(
-            EventTarget::webview_window(window.label()),
-            "close_note_request",
-            (),
-        )?;
-        Ok(())
-    } else {
-        bail!("No window currently focused!")
+
+    fn close_utility(&mut self, target: &FocusedSurface) -> anyhow::Result<()> {
+        self.app
+            .get_webview_window(&target.label)
+            .with_context(|| format!("The resolved window {} is no longer open", target.label))?
+            .close()
+            .context("Could not close the focused utility window")
+    }
+
+    fn render(&mut self, outcome: &UserActionOutcome) {
+        let message = match outcome {
+            UserActionOutcome::Failed { message } | UserActionOutcome::Busy { message } => message,
+            UserActionOutcome::Succeeded | UserActionOutcome::Cancelled => return,
+        };
+        self.app
+            .dialog()
+            .message(message)
+            .title("Sticky action failed")
+            .kind(MessageDialogKind::Error)
+            .show(|_| {});
+    }
+}
+
+fn request_native_user_action(
+    app: &AppHandle,
+    action: NativeUserAction,
+) -> Result<(), anyhow::Error> {
+    let mut transport = AppNativeUserActionTransport { app };
+    match dispatch_native_user_action(&mut transport, action) {
+        UserActionOutcome::Succeeded | UserActionOutcome::Cancelled => Ok(()),
+        UserActionOutcome::Busy { message } | UserActionOutcome::Failed { message } => {
+            anyhow::bail!(message)
+        }
+    }
+}
+
+pub(crate) fn request_mapped_native_user_action(
+    app: &AppHandle,
+    action: Result<NativeUserAction, anyhow::Error>,
+) -> Result<(), anyhow::Error> {
+    match action {
+        Ok(action) => request_native_user_action(app, action),
+        Err(error) => {
+            let mut transport = AppNativeUserActionTransport { app };
+            transport.render(&UserActionOutcome::Failed {
+                message: format!("{error:#}"),
+            });
+            Err(error)
+        }
     }
 }
 
@@ -863,20 +927,6 @@ pub fn cycle_focus(app: &AppHandle, reverse: bool) -> Result<(), anyhow::Error> 
         .context("Could not focus window")
 }
 
-pub fn set_color(app: &AppHandle, index: u8) -> Result<(), anyhow::Error> {
-    app.webview_windows()
-        .into_iter()
-        .filter(|(label, _)| label.starts_with("sticky_"))
-        .for_each(|(label, window)| {
-            if window.is_focused().unwrap_or(false) {
-                log::info!("emitting set color to window {}", label);
-                let _ = window.emit_to(EventTarget::webview_window(label), "set_color", index);
-            }
-        });
-
-    Ok(())
-}
-
 pub fn change_note_font_size(
     app: &AppHandle,
     window: &WebviewWindow,
@@ -927,9 +977,4 @@ pub fn change_note_font_size(
         font_size,
     )?;
     Ok(())
-}
-
-pub fn change_focused_note_font_size(app: &AppHandle, increase: bool) -> Result<(), anyhow::Error> {
-    let window = get_focused_window(app).context("No note currently focused")?;
-    change_note_font_size(app, &window, increase)
 }

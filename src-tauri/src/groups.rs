@@ -801,11 +801,6 @@ pub fn link_windows_on_this_side_below(
     Ok(())
 }
 
-pub fn link_windows_on_this_side_below_focused(app: &AppHandle) -> anyhow::Result<()> {
-    let parent = get_focused_window(app).context("No note or timer is currently focused")?;
-    link_windows_on_this_side_below(app, &parent)
-}
-
 pub fn unlink_group_for_focused(app: &AppHandle) -> anyhow::Result<()> {
     let runtime_state = app.state::<GroupRuntime>();
     let _runtime = runtime_state.lock()?;

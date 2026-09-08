@@ -6,6 +6,10 @@
   import { onDestroy, onMount, untrack } from "svelte";
 
   import Icon from "$lib/Icon.svelte";
+  import {
+    createTimerUserActionInput,
+    registerUserActionRequestListener,
+  } from "$lib/userActionWorkflow";
 
   interface TimerSnapshot {
     id: string;
@@ -295,22 +299,28 @@
 
   async function toggleAlwaysOnTop() {
     const next = !alwaysOnTop;
-    errorMessage = "";
-    try {
-      await invoke("set_timer_always_on_top", { alwaysOnTop: next });
-      alwaysOnTop = next;
-    } catch (error) {
-      errorMessage = String(error);
-    }
+    const outcome = next
+      ? await userActionInput.pin()
+      : await userActionInput.unpin();
+    if (outcome.status !== "succeeded") return outcome;
+
+    alwaysOnTop = next;
+    return outcome;
   }
 
-  async function closeTimer() {
-    errorMessage = "";
-    try {
-      await invoke("close_window");
-    } catch (error) {
-      errorMessage = String(error);
-    }
+  const userActionInput = createTimerUserActionInput(
+    { invoke },
+    (message) => confirm(message),
+    (outcome) => {
+      errorMessage =
+        outcome.status === "failed" || outcome.status === "busy"
+          ? outcome.message
+          : "";
+    },
+  );
+
+  function closeTimer() {
+    return userActionInput.close();
   }
 
   async function startWindowDrag() {
@@ -325,39 +335,21 @@
   async function toggleCollapsed() {
     if (busy) return;
     const next = !collapsed;
-    errorMessage = "";
-    settingsOpen = false;
-    try {
-      await invoke("set_collapsed", { collapsed: next });
-      collapsed = next;
-    } catch (error) {
-      errorMessage = String(error);
-    }
-  }
+    const outcome = next
+      ? await userActionInput.fold()
+      : await userActionInput.unfold();
+    if (outcome.status !== "succeeded") return outcome;
 
-  async function linkWindowsOnThisSide() {
-    if (busy) return;
-    if (!(await confirm("Are you sure you want to link these windows?"))) return;
-    busy = true;
-    errorMessage = "";
-    try {
-      await invoke("link_windows_on_this_side_below_current_window");
-    } catch (error) {
-      errorMessage = String(error);
-    } finally {
-      busy = false;
-    }
+    collapsed = next;
+    settingsOpen = false;
+    return outcome;
   }
 
   async function toggleSettings() {
     if (!settingsOpen && collapsed) {
-      try {
-        await invoke("set_collapsed", { collapsed: false });
-        collapsed = false;
-      } catch (error) {
-        errorMessage = String(error);
-        return;
-      }
+      const outcome = await userActionInput.unfold();
+      if (outcome.status !== "succeeded") return;
+      collapsed = false;
     }
     if (!settingsOpen) refreshSoundFields();
     errorMessage = "";
@@ -385,6 +377,7 @@
       await appWindow.listen("tauri://move", () => {
         void invoke("save_geometry");
       }),
+      await registerUserActionRequestListener(appWindow, userActionInput),
     );
   });
 
@@ -430,7 +423,7 @@
       disabled={busy}
       onclick={(event) => {
         event.stopPropagation();
-        void linkWindowsOnThisSide();
+        void userActionInput.relink();
       }}
       aria-label="Make this timer the parent and relink all windows on this side below it."
       title="Make this the parent and relink all windows on this side below it."

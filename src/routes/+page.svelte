@@ -16,6 +16,10 @@
   import ShortcutsHelp from "$lib/ShortcutsHelp.svelte";
   import Timer from "$lib/Timer.svelte";
   import Version from "$lib/Version.svelte";
+  import {
+    createNoteUserActionInput,
+    registerUserActionRequestListener,
+  } from "$lib/userActionWorkflow";
 
   interface StickyInit {
     always_on_top?: boolean;
@@ -69,51 +73,66 @@
     | undefined;
   let fontResizeFrame: number | undefined;
   let fontResizeRevision = 0;
-  let linkBusy = $state(false);
   let noteTitle = $state("Empty Note");
   let moveTimer: number | undefined;
   let geometrySettleRevision = 0;
+  let actionError = $state("");
   const unlisteners: Array<() => void> = [];
 
   const geometryDebounceMs = 150;
   const mouseReleasePollMs = 50;
 
   async function toggleAlwaysOnTop() {
-    await editor?.flushSave();
     const next = !alwaysOnTop;
-    await invoke("set_note_always_on_top", { alwaysOnTop: next });
+    const outcome = next
+      ? await userActionInput.pin()
+      : await userActionInput.unpin();
+    if (outcome.status !== "succeeded") return outcome;
+
     alwaysOnTop = next;
+    return outcome;
   }
 
-  async function linkNotesOnThisSide() {
-    if (linkBusy) return;
-    if (!(await confirm("Are you sure you want to link these windows?"))) return;
-    linkBusy = true;
-    try {
-      await editor?.flushSave();
-      await invoke("link_windows_on_this_side_below_current_window");
-    } finally {
-      linkBusy = false;
-    }
-  }
+  const userActionInput = createNoteUserActionInput(
+    {
+      invoke,
+      async flushPendingContent(color) {
+        if (!editor) throw new Error("The note editor is not ready");
+        await editor.flushSave(color);
+      },
+      prepareToCollapse() {
+        if (fontResizeFrame !== undefined) {
+          cancelAnimationFrame(fontResizeFrame);
+          fontResizeFrame = undefined;
+        }
+        fontResizeRevision += 1;
+        fontResizeBaseline = undefined;
+      },
+      displayColor(color) {
+        document.body.style.backgroundColor = color;
+        colorMenuOpen = false;
+      },
+    },
+    (message) => confirm(message),
+    (outcome) => {
+      actionError =
+        outcome.status === "failed" || outcome.status === "busy"
+          ? outcome.message
+          : "";
+    },
+  );
 
-  async function closeNote() {
-    await editor?.flushSave();
-    await invoke("close_window");
+  function closeNote() {
+    return userActionInput.close();
   }
 
   async function toggleCollapsed() {
-    await editor?.flushSave();
     const next = !collapsed;
-    if (next) {
-      if (fontResizeFrame !== undefined) {
-        cancelAnimationFrame(fontResizeFrame);
-        fontResizeFrame = undefined;
-      }
-      fontResizeRevision += 1;
-      fontResizeBaseline = undefined;
-    }
-    await invoke("set_collapsed", { collapsed: next });
+    const outcome = next
+      ? await userActionInput.fold()
+      : await userActionInput.unfold();
+    if (outcome.status !== "succeeded") return outcome;
+
     collapsed = next;
     colorMenuOpen = false;
     if (!collapsed) {
@@ -125,15 +144,11 @@
         }
       });
     }
+    return outcome;
   }
 
   function toggleColorMenu() {
     colorMenuOpen = !colorMenuOpen;
-  }
-
-  async function setColor(color: string) {
-    document.body.style.backgroundColor = color;
-    await editor?.flushSave();
   }
 
   function cancelGeometrySettlement() {
@@ -198,7 +213,7 @@
     ) {
       event.preventDefault();
       event.stopPropagation();
-      void invoke("change_font_size", { increase: event.code === "Equal" });
+      void userActionInput.changeFontSize(event.code === "Equal");
     }
   }
 
@@ -213,7 +228,10 @@
       event.preventDefault();
       event.stopPropagation();
       void (async () => {
-        if (collapsed) await toggleCollapsed();
+        if (collapsed) {
+          const outcome = await toggleCollapsed();
+          if (outcome?.status !== "succeeded") return;
+        }
         requestAnimationFrame(() => editor?.openFind());
       })();
     }
@@ -246,9 +264,7 @@
         // and then deliver their transcript by sending Command+V.
         await editor?.flushSave();
       }),
-      await appWindow.listen<number>("set_color", async (event) => {
-        await setColor(colors[event.payload]);
-      }),
+      await registerUserActionRequestListener(appWindow, userActionInput),
       await appWindow.listen<number>("set_font_size", (event) => {
         const previousFontSize = fontSize;
         const increased = event.payload > fontSize;
@@ -297,7 +313,6 @@
           });
         }
       }),
-      await appWindow.listen("close_note_request", () => closeNote()),
       await appWindow.listen("tauri://move", saveGeometryDebounced),
       await appWindow.listen("tauri://resize", saveGeometryDebounced),
     );
@@ -367,10 +382,9 @@
     </button>
     <button
       class="titlebar-button"
-      disabled={linkBusy}
       onclick={(event) => {
         event.stopPropagation();
-        void linkNotesOnThisSide();
+        void userActionInput.relink();
       }}
       aria-label="Make this note the parent and relink all windows on this side below it."
       title="Make this the parent and relink all windows on this side below it."
@@ -393,7 +407,7 @@
           class="color"
           onclick={(event) => {
             event.stopPropagation();
-            void setColor(color);
+            void userActionInput.setColor(color);
           }}
           aria-label={`set note color ${color}`}
           style:background={color}
@@ -404,6 +418,9 @@
   </div>
 
   <main class:collapsed>
+    {#if actionError}
+      <div class="action-error" role="alert">{actionError}</div>
+    {/if}
     <Editor
       bind:this={editor}
       {fontSize}
@@ -486,9 +503,22 @@
 
   main {
     height: calc(100vh - 24px);
+    position: relative;
   }
 
   main.collapsed {
     display: none;
+  }
+
+  .action-error {
+    background: rgba(120, 0, 0, 0.88);
+    color: white;
+    font-size: 12px;
+    left: 8px;
+    padding: 4px 6px;
+    position: absolute;
+    right: 8px;
+    top: 6px;
+    z-index: 3;
   }
 </style>

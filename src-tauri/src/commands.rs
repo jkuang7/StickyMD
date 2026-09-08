@@ -12,7 +12,11 @@ use crate::{
     pinned_windows::sync_pinned_window_registry,
     save_load::{note_id_from_label, NoteRepository},
     settings::MenuSettings,
-    windows::{apply_window_pin_state, change_note_font_size, create_sticky, sorted_windows},
+    user_action_workflow::{PinTarget, PinWorkflow},
+    windows::{
+        apply_window_pin_state, change_note_font_size, create_sticky,
+        snap_note_window as snap_target_note_window, sorted_windows, Direction,
+    },
 };
 
 const LEFT_MOUSE_BUTTON_MASK: usize = 1;
@@ -199,6 +203,16 @@ pub fn change_font_size(
 }
 
 #[tauri::command]
+pub fn snap_window(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    direction: Direction,
+    partial: bool,
+) -> Result<(), String> {
+    snap_target_note_window(&app, &window, direction, partial).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn create_note(app: tauri::AppHandle) -> Result<(), String> {
     create_sticky(&app)
         .map(|_| ())
@@ -251,35 +265,44 @@ pub fn set_note_always_on_top(
     window: tauri::WebviewWindow,
     always_on_top: bool,
 ) -> Result<(), String> {
-    let id = note_id_from_label(window.label()).map_err(|error| error.to_string())?;
-    let repository = window.state::<NoteRepository>();
-    let previous = repository
-        .get(id)
+    let id = note_id_from_label(window.label())
         .map_err(|error| error.to_string())?
-        .pinned;
-    apply_window_pin_state(&window, always_on_top).map_err(|error| error.to_string())?;
-    if let Err(error) = repository.update(id, |note| {
-        note.pinned = always_on_top;
-        Ok(())
-    }) {
-        let _ = apply_window_pin_state(&window, previous);
-        return Err(error.to_string());
+        .to_owned();
+    PinWorkflow::perform(&mut NotePinTarget { window, id }, always_on_top)
+        .map_err(|error| error.to_string())
+}
+
+struct NotePinTarget {
+    window: tauri::WebviewWindow,
+    id: String,
+}
+
+impl PinTarget for NotePinTarget {
+    fn current_pinned(&self) -> anyhow::Result<bool> {
+        Ok(self.window.state::<NoteRepository>().get(&self.id)?.pinned)
     }
-    if let Err(error) = sync_pinned_window_registry(window.app_handle(), None) {
-        let rollback = repository.update(id, |note| {
-            note.pinned = previous;
-            Ok(())
-        });
-        let native_rollback = apply_window_pin_state(&window, previous);
-        rollback.map_err(|rollback| {
-            format!("Could not roll back pin state after registry failure: {rollback:#}")
-        })?;
-        native_rollback.map_err(|rollback| {
-            format!("Could not roll back native pin state after registry failure: {rollback:#}")
-        })?;
-        return Err(error.to_string());
+
+    fn set_native_pinned(&mut self, pinned: bool) -> anyhow::Result<()> {
+        apply_window_pin_state(&self.window, pinned)
     }
-    window.set_focus().map_err(|error| error.to_string())
+
+    fn set_durable_pinned(&mut self, pinned: bool) -> anyhow::Result<()> {
+        self.window
+            .state::<NoteRepository>()
+            .update(&self.id, |note| {
+                note.pinned = pinned;
+                Ok(())
+            })
+            .map(|_| ())
+    }
+
+    fn sync_pinned_registry(&mut self) -> anyhow::Result<()> {
+        sync_pinned_window_registry(self.window.app_handle(), None)
+    }
+
+    fn focus(&mut self) -> anyhow::Result<()> {
+        self.window.set_focus().map_err(Into::into)
+    }
 }
 
 #[tauri::command]
