@@ -1,12 +1,14 @@
 use std::{
-    cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(target_os = "macos")]
+use std::{cell::RefCell, time::Instant};
 
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
@@ -1009,6 +1011,7 @@ fn sound_timer_alarm() {
     });
 }
 
+#[cfg(target_os = "macos")]
 fn alarm_playback_starts(sound_duration_ms: u64) -> Vec<u64> {
     let mut starts = Vec::with_capacity(ALARM_GROUP_COUNT * ALARM_PLAYS_PER_GROUP);
     let mut group_start = 0;

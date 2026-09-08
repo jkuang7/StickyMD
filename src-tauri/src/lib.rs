@@ -198,6 +198,7 @@ pub fn run() {
                     }
                 }
             }
+            #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
                 if let Err(error) = focus_existing_or_create(app) {
                     log::error!("Could not reopen notes from the Dock: {error:#}");
