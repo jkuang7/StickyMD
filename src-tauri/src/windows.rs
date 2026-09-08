@@ -621,6 +621,17 @@ pub fn request_close_window(app: &AppHandle) -> Result<(), anyhow::Error> {
             }
         }
     }
+    request_focused_surface_action(app, "user_action_close_requested")
+}
+
+pub fn request_relink_windows(app: &AppHandle) -> Result<(), anyhow::Error> {
+    request_focused_surface_action(app, "user_action_relink_requested")
+}
+
+fn request_focused_surface_action(
+    app: &AppHandle,
+    event: &'static str,
+) -> Result<(), anyhow::Error> {
     let mut target = None;
     for (label, window) in app.webview_windows() {
         if (label.starts_with("sticky_") || label.starts_with("timer_"))
@@ -634,11 +645,7 @@ pub fn request_close_window(app: &AppHandle) -> Result<(), anyhow::Error> {
     }
     let target = target.context("No note or timer is currently focused")?;
 
-    target.emit_to(
-        EventTarget::webview_window(target.label()),
-        "user_action_close_requested",
-        (),
-    )?;
+    target.emit_to(EventTarget::webview_window(target.label()), event, ())?;
     Ok(())
 }
 

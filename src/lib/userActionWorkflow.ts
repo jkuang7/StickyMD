@@ -1,7 +1,14 @@
-export type UserAction = "close" | "fold" | "unfold" | "pin" | "unpin";
+export type UserAction =
+  | "close"
+  | "fold"
+  | "unfold"
+  | "pin"
+  | "unpin"
+  | "relink";
 
 export type UserActionOutcome =
   | { status: "succeeded" }
+  | { status: "cancelled" }
   | { status: "busy"; message: string }
   | { status: "failed"; message: string };
 
@@ -9,6 +16,7 @@ interface SurfaceActionAdapter {
   close(): Promise<void>;
   setCollapsed(collapsed: boolean): Promise<void>;
   setPinned(pinned: boolean): Promise<void>;
+  relink(): Promise<void>;
 }
 
 export interface UserActionWorkflow {
@@ -19,6 +27,8 @@ type ResolveTarget = () =>
   | SurfaceActionAdapter
   | undefined
   | Promise<SurfaceActionAdapter | undefined>;
+
+const RELINK_CONFIRMATION = "Are you sure you want to link these windows?";
 
 function failureMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -31,6 +41,9 @@ function failureMessage(error: unknown): string {
  */
 export function createUserActionWorkflow(
   resolveTarget: ResolveTarget,
+  confirmRelink: (message: string) => Promise<boolean> = async () => {
+    throw new Error("Relink confirmation is not configured");
+  },
 ): UserActionWorkflow {
   let busy = false;
 
@@ -64,6 +77,12 @@ export function createUserActionWorkflow(
           case "unpin":
             await target.setPinned(false);
             return { status: "succeeded" };
+          case "relink":
+            if (!(await confirmRelink(RELINK_CONFIRMATION))) {
+              return { status: "cancelled" };
+            }
+            await target.relink();
+            return { status: "succeeded" };
         }
       } catch (error) {
         return { status: "failed", message: failureMessage(error) };
@@ -79,6 +98,7 @@ export function createNoteActionAdapter(dependencies: {
   closeSurface(): Promise<unknown>;
   setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
   setSurfacePinned(pinned: boolean): Promise<unknown>;
+  relinkSurface(): Promise<unknown>;
 }): SurfaceActionAdapter {
   return {
     async close() {
@@ -92,6 +112,10 @@ export function createNoteActionAdapter(dependencies: {
     async setPinned(pinned) {
       await dependencies.flushPendingContent();
       await dependencies.setSurfacePinned(pinned);
+    },
+    async relink() {
+      await dependencies.flushPendingContent();
+      await dependencies.relinkSurface();
     },
   };
 }
@@ -100,6 +124,7 @@ export function createTimerActionAdapter(dependencies: {
   closeSurface(): Promise<unknown>;
   setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
   setSurfacePinned(pinned: boolean): Promise<unknown>;
+  relinkSurface(): Promise<unknown>;
 }): SurfaceActionAdapter {
   return {
     async close() {
@@ -110,6 +135,9 @@ export function createTimerActionAdapter(dependencies: {
     },
     async setPinned(pinned) {
       await dependencies.setSurfacePinned(pinned);
+    },
+    async relink() {
+      await dependencies.relinkSurface();
     },
   };
 }
@@ -131,5 +159,6 @@ export function createUserActionInputAdapter(
     unfold: () => perform("unfold"),
     pin: () => perform("pin"),
     unpin: () => perform("unpin"),
+    relink: () => perform("relink"),
   };
 }

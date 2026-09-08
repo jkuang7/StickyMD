@@ -6,16 +6,14 @@ use tauri::{AppHandle, Manager, Wry};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_log::log;
 
-use crate::groups::{
-    link_windows_on_this_side_below_focused, reset_window_positions, unlink_group_for_focused,
-};
+use crate::groups::{reset_window_positions, unlink_group_for_focused};
 use crate::save_load::save_settings;
 use crate::settings::MenuSettings;
 use crate::timers::create_timer_window;
 use crate::windows::{
     change_focused_note_font_size, create_sticky, cycle_focus, request_close_window,
-    restore_all_notes, restore_last_closed, set_color, show_version_window, snap_window,
-    toggle_note_visibility, toggle_shortcuts_window, Direction,
+    request_relink_windows, restore_all_notes, restore_last_closed, set_color, show_version_window,
+    snap_window, toggle_note_visibility, toggle_shortcuts_window, Direction,
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
@@ -314,9 +312,7 @@ pub fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
                 MenuCommand::NewNote => create_sticky(app).map(|_| ()),
                 MenuCommand::NewTimer => create_timer_window(app).map(|_| ()),
                 MenuCommand::ResetPositions => reset_window_positions(app),
-                MenuCommand::LinkWindowsOnThisSideBelowCurrent => {
-                    link_windows_on_this_side_below_focused(app)
-                }
+                MenuCommand::LinkWindowsOnThisSideBelowCurrent => request_relink_windows(app),
                 MenuCommand::UnlinkThisGroup => unlink_group_for_focused(app),
                 MenuCommand::Snap(direction) => snap_window(app, direction, false),
                 MenuCommand::PartialSnap(direction) => snap_window(app, direction, true),

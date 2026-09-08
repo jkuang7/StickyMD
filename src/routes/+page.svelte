@@ -74,7 +74,6 @@
     | undefined;
   let fontResizeFrame: number | undefined;
   let fontResizeRevision = 0;
-  let linkBusy = $state(false);
   let noteTitle = $state("Empty Note");
   let moveTimer: number | undefined;
   let geometrySettleRevision = 0;
@@ -95,44 +94,39 @@
     return outcome;
   }
 
-  async function linkNotesOnThisSide() {
-    if (linkBusy) return;
-    if (!(await confirm("Are you sure you want to link these windows?"))) return;
-    linkBusy = true;
-    try {
-      await editor?.flushSave();
-      await invoke("link_windows_on_this_side_below_current_window");
-    } finally {
-      linkBusy = false;
-    }
-  }
-
-  const userActionWorkflow = createUserActionWorkflow(() =>
-    createNoteActionAdapter({
-      async flushPendingContent() {
-        if (!editor) throw new Error("The note editor is not ready");
-        await editor.flushSave();
-      },
-      closeSurface: () => invoke("close_window"),
-      async setSurfaceCollapsed(next) {
-        if (next) {
-          if (fontResizeFrame !== undefined) {
-            cancelAnimationFrame(fontResizeFrame);
-            fontResizeFrame = undefined;
+  const userActionWorkflow = createUserActionWorkflow(
+    () =>
+      createNoteActionAdapter({
+        async flushPendingContent() {
+          if (!editor) throw new Error("The note editor is not ready");
+          await editor.flushSave();
+        },
+        closeSurface: () => invoke("close_window"),
+        async setSurfaceCollapsed(next) {
+          if (next) {
+            if (fontResizeFrame !== undefined) {
+              cancelAnimationFrame(fontResizeFrame);
+              fontResizeFrame = undefined;
+            }
+            fontResizeRevision += 1;
+            fontResizeBaseline = undefined;
           }
-          fontResizeRevision += 1;
-          fontResizeBaseline = undefined;
-        }
-        await invoke("set_collapsed", { collapsed: next });
-      },
-      setSurfacePinned: (next) =>
-        invoke("set_note_always_on_top", { alwaysOnTop: next }),
-    }),
+          await invoke("set_collapsed", { collapsed: next });
+        },
+        setSurfacePinned: (next) =>
+          invoke("set_note_always_on_top", { alwaysOnTop: next }),
+        relinkSurface: () =>
+          invoke("link_windows_on_this_side_below_current_window"),
+      }),
+    (message) => confirm(message),
   );
   const userActionInput = createUserActionInputAdapter(
     userActionWorkflow,
     (outcome) => {
-      actionError = outcome.status === "succeeded" ? "" : outcome.message;
+      actionError =
+        outcome.status === "failed" || outcome.status === "busy"
+          ? outcome.message
+          : "";
     },
   );
 
@@ -335,6 +329,9 @@
         }
       }),
       await appWindow.listen("user_action_close_requested", () => closeNote()),
+      await appWindow.listen("user_action_relink_requested", () =>
+        userActionInput.relink(),
+      ),
       await appWindow.listen("tauri://move", saveGeometryDebounced),
       await appWindow.listen("tauri://resize", saveGeometryDebounced),
     );
@@ -404,10 +401,9 @@
     </button>
     <button
       class="titlebar-button"
-      disabled={linkBusy}
       onclick={(event) => {
         event.stopPropagation();
-        void linkNotesOnThisSide();
+        void userActionInput.relink();
       }}
       aria-label="Make this note the parent and relink all windows on this side below it."
       title="Make this the parent and relink all windows on this side below it."

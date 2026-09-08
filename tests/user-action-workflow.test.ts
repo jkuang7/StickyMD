@@ -354,3 +354,174 @@ test("pin shares stable targeting and the workflow busy policy", async () => {
   assert.deepEqual(await pin, { status: "succeeded" });
   assert.deepEqual(events, ["first pin"]);
 });
+
+test("relink resolves once, confirms, then flushes a note before mutation", async () => {
+  const events: string[] = [];
+  const target = createNoteActionAdapter({
+    flushPendingContent: async () => events.push("flush"),
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => events.push("relink"),
+  });
+  const workflow = createUserActionWorkflow(
+    () => {
+      events.push("resolve");
+      return target;
+    },
+    async () => {
+      events.push("confirm");
+      return true;
+    },
+  );
+
+  assert.deepEqual(await workflow.perform("relink"), { status: "succeeded" });
+  assert.deepEqual(events, ["resolve", "confirm", "flush", "relink"]);
+});
+
+test("cancelled relink is a successful no-op before note persistence", async () => {
+  const events: string[] = [];
+  const target = createNoteActionAdapter({
+    flushPendingContent: async () => events.push("flush"),
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => events.push("relink"),
+  });
+  const workflow = createUserActionWorkflow(
+    () => target,
+    async () => {
+      events.push("confirm");
+      return false;
+    },
+  );
+
+  assert.deepEqual(await workflow.perform("relink"), { status: "cancelled" });
+  assert.deepEqual(events, ["confirm"]);
+});
+
+test("failed note flush prevents an accepted relink mutation", async () => {
+  const events: string[] = [];
+  const target = createNoteActionAdapter({
+    flushPendingContent: async () => {
+      events.push("flush");
+      throw new Error("save unavailable");
+    },
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => events.push("relink"),
+  });
+  const workflow = createUserActionWorkflow(() => target, async () => true);
+
+  assert.deepEqual(await workflow.perform("relink"), {
+    status: "failed",
+    message: "save unavailable",
+  });
+  assert.deepEqual(events, ["flush"]);
+});
+
+test("timer relink confirms and mutates without note persistence", async () => {
+  const events: string[] = [];
+  const target = createTimerActionAdapter({
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => events.push("relink"),
+  });
+  const workflow = createUserActionWorkflow(
+    () => target,
+    async () => {
+      events.push("confirm");
+      return true;
+    },
+  );
+
+  assert.deepEqual(await workflow.perform("relink"), { status: "succeeded" });
+  assert.deepEqual(events, ["confirm", "relink"]);
+});
+
+test("relink retains its target and stays busy throughout confirmation", async () => {
+  const events: string[] = [];
+  let releaseConfirmation!: (accepted: boolean) => void;
+  const first = createTimerActionAdapter({
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => events.push("first relink"),
+  });
+  const second = createTimerActionAdapter({
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async () => undefined,
+    setSurfacePinned: async () => undefined,
+    relinkSurface: async () => events.push("second relink"),
+  });
+  let focused = first;
+  let resolutions = 0;
+  const workflow = createUserActionWorkflow(
+    () => {
+      resolutions += 1;
+      return focused;
+    },
+    () =>
+      new Promise<boolean>((resolve) => {
+        events.push("confirm");
+        releaseConfirmation = resolve;
+      }),
+  );
+
+  const relink = workflow.perform("relink");
+  await new Promise((resolve) => setImmediate(resolve));
+  focused = second;
+  assert.deepEqual(await workflow.perform("relink"), {
+    status: "busy",
+    message: "Another user action is already running",
+  });
+  releaseConfirmation(true);
+
+  assert.deepEqual(await relink, { status: "succeeded" });
+  assert.equal(resolutions, 1);
+  assert.deepEqual(events, ["confirm", "first relink"]);
+});
+
+test("missing relink targets fail without confirmation or mutation", async () => {
+  let confirmations = 0;
+  const workflow = createUserActionWorkflow(
+    () => undefined,
+    async () => {
+      confirmations += 1;
+      return true;
+    },
+  );
+
+  assert.deepEqual(await workflow.perform("relink"), {
+    status: "failed",
+    message: "No valid note or timer target",
+  });
+  assert.equal(confirmations, 0);
+});
+
+test("the shared input adapter routes relink success, cancellation, and failure", async () => {
+  const outcomes = [
+    { status: "succeeded" },
+    { status: "cancelled" },
+    { status: "failed", message: "relink failed" },
+  ];
+  const actions: string[] = [];
+  const rendered: unknown[] = [];
+  const workflow = {
+    async perform(action) {
+      actions.push(action);
+      return outcomes[actions.length - 1];
+    },
+  };
+  const adapter = createUserActionInputAdapter(workflow, (outcome) =>
+    rendered.push(outcome),
+  );
+
+  assert.deepEqual(await adapter.relink(), outcomes[0]);
+  assert.deepEqual(await adapter.relink(), outcomes[1]);
+  assert.deepEqual(await adapter.relink(), outcomes[2]);
+  assert.deepEqual(actions, ["relink", "relink", "relink"]);
+  assert.deepEqual(rendered, outcomes);
+});

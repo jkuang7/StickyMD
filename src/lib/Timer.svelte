@@ -309,19 +309,26 @@
     return outcome;
   }
 
-  const userActionWorkflow = createUserActionWorkflow(() =>
-    createTimerActionAdapter({
-      closeSurface: () => invoke("close_window"),
-      setSurfaceCollapsed: (next) =>
-        invoke("set_collapsed", { collapsed: next }),
-      setSurfacePinned: (next) =>
-        invoke("set_timer_always_on_top", { alwaysOnTop: next }),
-    }),
+  const userActionWorkflow = createUserActionWorkflow(
+    () =>
+      createTimerActionAdapter({
+        closeSurface: () => invoke("close_window"),
+        setSurfaceCollapsed: (next) =>
+          invoke("set_collapsed", { collapsed: next }),
+        setSurfacePinned: (next) =>
+          invoke("set_timer_always_on_top", { alwaysOnTop: next }),
+        relinkSurface: () =>
+          invoke("link_windows_on_this_side_below_current_window"),
+      }),
+    (message) => confirm(message),
   );
   const userActionInput = createUserActionInputAdapter(
     userActionWorkflow,
     (outcome) => {
-      errorMessage = outcome.status === "succeeded" ? "" : outcome.message;
+      errorMessage =
+        outcome.status === "failed" || outcome.status === "busy"
+          ? outcome.message
+          : "";
     },
   );
 
@@ -349,20 +356,6 @@
     collapsed = next;
     settingsOpen = false;
     return outcome;
-  }
-
-  async function linkWindowsOnThisSide() {
-    if (busy) return;
-    if (!(await confirm("Are you sure you want to link these windows?"))) return;
-    busy = true;
-    errorMessage = "";
-    try {
-      await invoke("link_windows_on_this_side_below_current_window");
-    } catch (error) {
-      errorMessage = String(error);
-    } finally {
-      busy = false;
-    }
   }
 
   async function toggleSettings() {
@@ -398,6 +391,9 @@
         void invoke("save_geometry");
       }),
       await appWindow.listen("user_action_close_requested", () => closeTimer()),
+      await appWindow.listen("user_action_relink_requested", () =>
+        userActionInput.relink(),
+      ),
     );
   });
 
@@ -443,7 +439,7 @@
       disabled={busy}
       onclick={(event) => {
         event.stopPropagation();
-        void linkWindowsOnThisSide();
+        void userActionInput.relink();
       }}
       aria-label="Make this timer the parent and relink all windows on this side below it."
       title="Make this the parent and relink all windows on this side below it."
