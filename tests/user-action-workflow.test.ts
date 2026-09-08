@@ -120,31 +120,36 @@ test("missing targets and duplicate input do not mutate a surface", async () => 
   const first = workflow.perform("close");
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.deepEqual(await workflow.perform("close"), { status: "busy" });
+  assert.deepEqual(await workflow.perform("close"), {
+    status: "busy",
+    message: "Another user action is already running",
+  });
   assert.equal(closes, 1);
   release();
   assert.deepEqual(await first, { status: "succeeded" });
 });
 
-test("menu and webview input adapters render the workflow's one outcome", async () => {
-  for (const entry of ["menu", "webview"]) {
-    const rendered: unknown[] = [];
-    const workflow = createUserActionWorkflow(() =>
-      createTimerActionAdapter({
-        closeSurface: async () => {
-          throw new Error(`${entry} close failed`);
-        },
-      }),
-    );
-    const adapter = createUserActionInputAdapter(workflow, (outcome) => {
-      rendered.push(outcome);
-    });
+test("the shared input adapter maps close and renders every workflow outcome", async () => {
+  const outcomes = [
+    { status: "succeeded" },
+    { status: "busy", message: "Another user action is already running" },
+    { status: "failed", message: "close failed" },
+  ];
+  const actions: string[] = [];
+  const rendered: unknown[] = [];
+  const workflow = {
+    async perform(action) {
+      actions.push(action);
+      return outcomes[actions.length - 1];
+    },
+  };
+  const adapter = createUserActionInputAdapter(workflow, (outcome) => {
+    rendered.push(outcome);
+  });
 
-    const outcome = await adapter.close();
-    assert.deepEqual(outcome, {
-      status: "failed",
-      message: `${entry} close failed`,
-    });
-    assert.deepEqual(rendered, [outcome]);
-  }
+  assert.deepEqual(await adapter.close(), outcomes[0]);
+  assert.deepEqual(await adapter.close(), outcomes[1]);
+  assert.deepEqual(await adapter.close(), outcomes[2]);
+  assert.deepEqual(actions, ["close", "close", "close"]);
+  assert.deepEqual(rendered, outcomes);
 });

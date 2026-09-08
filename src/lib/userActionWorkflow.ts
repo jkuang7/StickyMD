@@ -2,7 +2,7 @@ export type UserAction = "close";
 
 export type UserActionOutcome =
   | { status: "succeeded" }
-  | { status: "busy" }
+  | { status: "busy"; message: string }
   | { status: "failed"; message: string };
 
 interface SurfaceActionAdapter {
@@ -34,7 +34,12 @@ export function createUserActionWorkflow(
 
   return {
     async perform(action) {
-      if (busy) return { status: "busy" };
+      if (busy) {
+        return {
+          status: "busy",
+          message: "Another user action is already running",
+        };
+      }
       busy = true;
 
       try {
@@ -77,7 +82,7 @@ export function createTimerActionAdapter(dependencies: {
   };
 }
 
-/** Translate titlebar/menu input and render exactly the workflow outcome. */
+/** Translate an input request and render exactly the workflow outcome. */
 export function createUserActionInputAdapter(
   workflow: UserActionWorkflow,
   render: (outcome: UserActionOutcome) => void,

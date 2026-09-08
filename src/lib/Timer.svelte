@@ -317,11 +317,7 @@
   const userActionInput = createUserActionInputAdapter(
     userActionWorkflow,
     (outcome) => {
-      if (outcome.status === "failed") {
-        errorMessage = outcome.message;
-      } else if (outcome.status === "succeeded") {
-        errorMessage = "";
-      }
+      errorMessage = outcome.status === "succeeded" ? "" : outcome.message;
     },
   );
 

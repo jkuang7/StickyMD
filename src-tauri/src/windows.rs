@@ -621,15 +621,18 @@ pub fn request_close_window(app: &AppHandle) -> Result<(), anyhow::Error> {
             }
         }
     }
-    let target = app
-        .webview_windows()
-        .into_iter()
-        .find_map(|(label, window)| {
-            ((label.starts_with("sticky_") || label.starts_with("timer_"))
-                && window.is_focused().unwrap_or(false))
-            .then_some(window)
-        })
-        .context("No note or timer is currently focused")?;
+    let mut target = None;
+    for (label, window) in app.webview_windows() {
+        if (label.starts_with("sticky_") || label.starts_with("timer_"))
+            && window
+                .is_focused()
+                .with_context(|| format!("Could not inspect focus for {label}"))?
+        {
+            target = Some(window);
+            break;
+        }
+    }
+    let target = target.context("No note or timer is currently focused")?;
 
     target.emit_to(
         EventTarget::webview_window(target.label()),
