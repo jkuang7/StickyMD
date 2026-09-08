@@ -110,8 +110,17 @@
         await editor.flushSave();
       },
       closeSurface: () => invoke("close_window"),
-      setSurfaceCollapsed: (next) =>
-        invoke("set_collapsed", { collapsed: next }),
+      async setSurfaceCollapsed(next) {
+        if (next) {
+          if (fontResizeFrame !== undefined) {
+            cancelAnimationFrame(fontResizeFrame);
+            fontResizeFrame = undefined;
+          }
+          fontResizeRevision += 1;
+          fontResizeBaseline = undefined;
+        }
+        await invoke("set_collapsed", { collapsed: next });
+      },
     }),
   );
   const userActionInput = createUserActionInputAdapter(
@@ -127,14 +136,6 @@
 
   async function toggleCollapsed() {
     const next = !collapsed;
-    if (next) {
-      if (fontResizeFrame !== undefined) {
-        cancelAnimationFrame(fontResizeFrame);
-        fontResizeFrame = undefined;
-      }
-      fontResizeRevision += 1;
-      fontResizeBaseline = undefined;
-    }
     const outcome = next
       ? await userActionInput.fold()
       : await userActionInput.unfold();
