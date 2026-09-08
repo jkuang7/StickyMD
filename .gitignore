@@ -11,3 +11,8 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Sandcastle runtime state, worktrees, and build artifacts
+/.sandcastle/*
+!/.sandcastle/verification.json
+/src-tauri/target-sandcastle/

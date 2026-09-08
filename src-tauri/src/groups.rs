@@ -125,6 +125,13 @@ impl WindowRect {
     fn contains_center_twice(self, (x, y): (i64, i64)) -> bool {
         2 * self.x <= x && x < 2 * self.right() && 2 * self.y <= y && y < 2 * self.bottom()
     }
+
+    fn intersects(self, other: Self) -> bool {
+        self.x < other.right()
+            && self.right() > other.x
+            && self.y < other.bottom()
+            && self.bottom() > other.y
+    }
 }
 
 fn get_focused_window(app: &AppHandle) -> Option<WebviewWindow> {
@@ -489,6 +496,24 @@ enum PositionSettlement {
     AdoptProgrammatic(PhysicalPosition<i32>),
     ExternalMove,
     Unchanged,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ExternalMoveSettlement {
+    RestoreDurable,
+    IgnoreTransientParking,
+}
+
+fn external_move_settlement(
+    observed: NoteGeometry,
+    displays: &[WindowRect],
+) -> ExternalMoveSettlement {
+    let observed = WindowRect::from_physical(observed.position, observed.size);
+    if !displays.is_empty() && displays.iter().all(|display| !display.intersects(observed)) {
+        ExternalMoveSettlement::IgnoreTransientParking
+    } else {
+        ExternalMoveSettlement::RestoreDurable
+    }
 }
 
 fn positions_within_rounding_tolerance(
@@ -1152,11 +1177,22 @@ pub fn settle_window_geometry(window: &WebviewWindow) -> anyhow::Result<()> {
             }
             PositionSettlement::ExternalMove => {
                 if current.pinned() {
-                    window.set_position(LogicalPosition::new(current.x(), current.y()))?;
-                    let requested =
-                        LogicalPosition::new(current.x(), current.y()).to_physical(scale);
-                    geometries.set_position(&member.id, requested)?;
-                    runtime.record_programmatic_position(key.clone(), requested);
+                    let displays = window
+                        .available_monitors()?
+                        .into_iter()
+                        .map(|monitor| {
+                            WindowRect::from_physical(*monitor.position(), *monitor.size())
+                        })
+                        .collect::<Vec<_>>();
+                    if external_move_settlement(geometry, &displays)
+                        == ExternalMoveSettlement::RestoreDurable
+                    {
+                        window.set_position(LogicalPosition::new(current.x(), current.y()))?;
+                        let requested =
+                            LogicalPosition::new(current.x(), current.y()).to_physical(scale);
+                        geometries.set_position(&member.id, requested)?;
+                        runtime.record_programmatic_position(key.clone(), requested);
+                    }
                 }
             }
             PositionSettlement::Unchanged => {}
@@ -1988,6 +2024,67 @@ mod tests {
             PositionSettlement::ExternalMove
         );
         assert_eq!(pending.get("note"), Some(&requested));
+    }
+
+    #[test]
+    fn wholly_off_display_external_move_is_transient_parking() {
+        let displays = [WindowRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }];
+
+        assert_eq!(
+            external_move_settlement(geometry(1920, 1080, 300, 250), &displays),
+            ExternalMoveSettlement::IgnoreTransientParking
+        );
+    }
+
+    #[test]
+    fn partially_visible_external_move_still_restores_durable_position() {
+        let displays = [WindowRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }];
+
+        assert_eq!(
+            external_move_settlement(geometry(1919, 1079, 300, 250), &displays),
+            ExternalMoveSettlement::RestoreDurable
+        );
+    }
+
+    #[test]
+    fn external_move_visible_on_any_attached_display_still_restores() {
+        let displays = [
+            WindowRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            WindowRect {
+                x: -1600,
+                y: -400,
+                width: 1600,
+                height: 900,
+            },
+        ];
+
+        assert_eq!(
+            external_move_settlement(geometry(-300, -200, 300, 250), &displays),
+            ExternalMoveSettlement::RestoreDurable
+        );
+    }
+
+    #[test]
+    fn missing_display_geometry_conservatively_restores_external_move() {
+        assert_eq!(
+            external_move_settlement(geometry(4000, 2000, 300, 250), &[]),
+            ExternalMoveSettlement::RestoreDurable
+        );
     }
 
     #[test]
