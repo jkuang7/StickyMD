@@ -3,6 +3,8 @@ use serde::{ser::SerializeStruct, Serialize, Serializer};
 
 use crate::windows::Direction;
 
+pub(crate) const USER_ACTION_REQUEST_EVENT: &str = "user_action_requested";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NativeUserAction {
     Close,
@@ -197,9 +199,25 @@ mod tests {
             [("sticky_a".into(), NativeUserAction::Relink)]
         );
         assert!(transport.rendered.is_empty());
+        assert_eq!(USER_ACTION_REQUEST_EVENT, "user_action_requested");
         assert_eq!(
             serde_json::to_value(NativeUserAction::Close).unwrap(),
             serde_json::json!("close")
+        );
+        assert_eq!(
+            serde_json::to_value(NativeUserAction::Relink).unwrap(),
+            serde_json::json!("relink")
+        );
+        assert_eq!(
+            serde_json::to_value(NativeUserAction::SetColor {
+                color: "#81b7dd".into(),
+            })
+            .unwrap(),
+            serde_json::json!({"type": "set-color", "color": "#81b7dd"})
+        );
+        assert_eq!(
+            serde_json::to_value(NativeUserAction::ChangeFontSize { increase: false }).unwrap(),
+            serde_json::json!({"type": "change-font-size", "increase": false})
         );
         assert_eq!(
             serde_json::to_value(NativeUserAction::Snap {

@@ -13,7 +13,7 @@ use tauri_plugin_log::log;
 
 use crate::native_user_action::{
     dispatch_native_user_action, FocusedSurface, NativeUserAction, NativeUserActionTransport,
-    SurfaceKind, UserActionOutcome,
+    SurfaceKind, UserActionOutcome, USER_ACTION_REQUEST_EVENT,
 };
 use crate::pinned_windows::sync_pinned_window_registry;
 use crate::save_load::{note_id_from_label, save_settings, NoteRepository, StoredNote};
@@ -616,8 +616,6 @@ pub fn open_sticky(app: &AppHandle, note: &StoredNote) -> Result<WebviewWindow, 
 
     Ok(window)
 }
-
-const USER_ACTION_REQUEST_EVENT: &str = "user_action_requested";
 
 struct AppNativeUserActionTransport<'a> {
     app: &'a AppHandle,

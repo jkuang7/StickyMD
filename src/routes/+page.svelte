@@ -95,34 +95,23 @@
 
   const userActionInput = createNoteUserActionInput(
     {
-        async flushPendingContent(color) {
-          if (!editor) throw new Error("The note editor is not ready");
-          await editor.flushSave(color);
-        },
-        closeSurface: () => invoke("close_window"),
-        async setSurfaceCollapsed(next) {
-          if (next) {
-            if (fontResizeFrame !== undefined) {
-              cancelAnimationFrame(fontResizeFrame);
-              fontResizeFrame = undefined;
-            }
-            fontResizeRevision += 1;
-            fontResizeBaseline = undefined;
-          }
-          await invoke("set_collapsed", { collapsed: next });
-        },
-        setSurfacePinned: (next) =>
-          invoke("set_note_always_on_top", { alwaysOnTop: next }),
-        relinkSurface: () =>
-          invoke("link_windows_on_this_side_below_current_window"),
-        async setSurfaceColor(color) {
-          document.body.style.backgroundColor = color;
-          colorMenuOpen = false;
-        },
-        changeSurfaceFontSize: (increase) =>
-          invoke("change_font_size", { increase }),
-        snapSurface: (direction, partial) =>
-          invoke("snap_window", { direction, partial }),
+      invoke,
+      async flushPendingContent(color) {
+        if (!editor) throw new Error("The note editor is not ready");
+        await editor.flushSave(color);
+      },
+      prepareToCollapse() {
+        if (fontResizeFrame !== undefined) {
+          cancelAnimationFrame(fontResizeFrame);
+          fontResizeFrame = undefined;
+        }
+        fontResizeRevision += 1;
+        fontResizeBaseline = undefined;
+      },
+      displayColor(color) {
+        document.body.style.backgroundColor = color;
+        colorMenuOpen = false;
+      },
     },
     (message) => confirm(message),
     (outcome) => {

@@ -309,15 +309,7 @@
   }
 
   const userActionInput = createTimerUserActionInput(
-    {
-        closeSurface: () => invoke("close_window"),
-        setSurfaceCollapsed: (next) =>
-          invoke("set_collapsed", { collapsed: next }),
-        setSurfacePinned: (next) =>
-          invoke("set_timer_always_on_top", { alwaysOnTop: next }),
-        relinkSurface: () =>
-          invoke("link_windows_on_this_side_below_current_window"),
-    },
+    { invoke },
     (message) => confirm(message),
     (outcome) => {
       errorMessage =

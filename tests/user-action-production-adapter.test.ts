@@ -27,39 +27,46 @@ function memoryListener() {
   };
 }
 
-function noteDependencies(events, failures = new Set()) {
-  const run = async (step, detail = step) => {
-    events.push(detail);
-    if (failures.has(step)) throw new Error(`${step} failed`);
-  };
+function noteBindings(events, failures = new Map()) {
   return {
-    flushPendingContent: async (color) =>
-      run("flush", color ? `flush:${color}` : "flush"),
-    closeSurface: async () => run("close", "archive:group:native-close:focus"),
-    setSurfaceCollapsed: async (collapsed) =>
-      run("collapse", `${collapsed ? "fold" : "unfold"}:durable:native:group:focus`),
-    setSurfacePinned: async (pinned) =>
-      run("pin", `${pinned ? "pin" : "unpin"}:native:durable:registry:focus`),
-    relinkSurface: async () => run("group", "group:native:focus"),
-    setSurfaceColor: async (color) => run("color", `display:${color}`),
-    changeSurfaceFontSize: async (increase) =>
-      run("font", `${increase ? "font-up" : "font-down"}:durable:native:group:focus`),
-    snapSurface: async (direction, partial) =>
-      run("snap", `${partial ? "partial" : "full"}:${direction}:native:group:focus`),
+    async invoke(command, args) {
+      events.push({ step: "invoke", command, args });
+      if (failures.has(command)) throw new Error(failures.get(command));
+    },
+    async flushPendingContent(color) {
+      events.push({ step: "flush", color });
+      if (failures.has("flush")) throw new Error(failures.get("flush"));
+    },
+    prepareToCollapse() {
+      events.push({ step: "prepare-to-collapse" });
+    },
+    displayColor(color) {
+      events.push({ step: "display-color", color });
+    },
   };
 }
 
-test("production listener maps every native menu and accelerator payload into the note workflow", async () => {
+function timerBindings(events, failures = new Map()) {
+  return {
+    async invoke(command, args) {
+      events.push({ step: "invoke", command, args });
+      if (failures.has(command)) throw new Error(failures.get(command));
+    },
+  };
+}
+
+test("native menu and accelerator payloads use the production note commands", async () => {
   const events = [];
   const outcomes = [];
   const listener = memoryListener();
   const input = createNoteUserActionInput(
-    noteDependencies(events),
+    noteBindings(events),
     async () => true,
     (outcome) => outcomes.push(outcome),
   );
   const unlisten = await registerUserActionRequestListener(listener.target, input);
 
+  assert.equal(USER_ACTION_REQUEST_EVENT, "user_action_requested");
   assert.deepEqual([...listener.listeners.keys()], [USER_ACTION_REQUEST_EVENT]);
   await listener.dispatch("close");
   await listener.dispatch("relink");
@@ -69,18 +76,34 @@ test("production listener maps every native menu and accelerator payload into th
   await listener.dispatch({ type: "snap", direction: "Right", partial: true });
 
   assert.deepEqual(events, [
-    "flush",
-    "archive:group:native-close:focus",
-    "flush",
-    "group:native:focus",
-    "flush:#65a65b",
-    "display:#65a65b",
-    "flush",
-    "font-down:durable:native:group:focus",
-    "flush",
-    "full:Up:native:group:focus",
-    "flush",
-    "partial:Right:native:group:focus",
+    { step: "flush", color: undefined },
+    { step: "invoke", command: "close_window", args: undefined },
+    { step: "flush", color: undefined },
+    {
+      step: "invoke",
+      command: "link_windows_on_this_side_below_current_window",
+      args: undefined,
+    },
+    { step: "flush", color: "#65a65b" },
+    { step: "display-color", color: "#65a65b" },
+    { step: "flush", color: undefined },
+    {
+      step: "invoke",
+      command: "change_font_size",
+      args: { increase: false },
+    },
+    { step: "flush", color: undefined },
+    {
+      step: "invoke",
+      command: "snap_window",
+      args: { direction: "Up", partial: false },
+    },
+    { step: "flush", color: undefined },
+    {
+      step: "invoke",
+      command: "snap_window",
+      args: { direction: "Right", partial: true },
+    },
   ]);
   assert.deepEqual(outcomes, Array(6).fill({ status: "succeeded" }));
 
@@ -88,11 +111,30 @@ test("production listener maps every native menu and accelerator payload into th
   assert.equal(listener.listeners.size, 0);
 });
 
-test("production titlebar input crosses the same note workflow seam", async () => {
+test("invalid native payloads render failure without reaching a command", async () => {
+  const events = [];
+  const outcomes = [];
+  const listener = memoryListener();
+  const input = createNoteUserActionInput(
+    noteBindings(events),
+    async () => true,
+    (outcome) => outcomes.push(outcome),
+  );
+  await registerUserActionRequestListener(listener.target, input);
+
+  await listener.dispatch({ type: "snap", direction: "North", partial: false });
+
+  assert.deepEqual(events, []);
+  assert.deepEqual(outcomes, [
+    { status: "failed", message: "Invalid user action request" },
+  ]);
+});
+
+test("titlebar inputs use the production note commands", async () => {
   const events = [];
   const outcomes = [];
   const input = createNoteUserActionInput(
-    noteDependencies(events),
+    noteBindings(events),
     async () => true,
     (outcome) => outcomes.push(outcome),
   );
@@ -104,33 +146,47 @@ test("production titlebar input crosses the same note workflow seam", async () =
   await input.relink();
 
   assert.deepEqual(events, [
-    "flush",
-    "fold:durable:native:group:focus",
-    "flush",
-    "unfold:durable:native:group:focus",
-    "flush",
-    "pin:native:durable:registry:focus",
-    "flush",
-    "unpin:native:durable:registry:focus",
-    "flush",
-    "group:native:focus",
+    { step: "flush", color: undefined },
+    { step: "prepare-to-collapse" },
+    {
+      step: "invoke",
+      command: "set_collapsed",
+      args: { collapsed: true },
+    },
+    { step: "flush", color: undefined },
+    {
+      step: "invoke",
+      command: "set_collapsed",
+      args: { collapsed: false },
+    },
+    { step: "flush", color: undefined },
+    {
+      step: "invoke",
+      command: "set_note_always_on_top",
+      args: { alwaysOnTop: true },
+    },
+    { step: "flush", color: undefined },
+    {
+      step: "invoke",
+      command: "set_note_always_on_top",
+      args: { alwaysOnTop: false },
+    },
+    { step: "flush", color: undefined },
+    {
+      step: "invoke",
+      command: "link_windows_on_this_side_below_current_window",
+      args: undefined,
+    },
   ]);
   assert.deepEqual(outcomes, Array(5).fill({ status: "succeeded" }));
 });
 
-test("production timer listener keeps shared actions direct and rejects note-only payloads", async () => {
+test("timer inputs use production commands directly and reject note-only payloads", async () => {
   const events = [];
   const outcomes = [];
   const listener = memoryListener();
   const input = createTimerUserActionInput(
-    {
-      closeSurface: async () => events.push("delete:group:native-close:focus"),
-      setSurfaceCollapsed: async (collapsed) =>
-        events.push(`${collapsed ? "fold" : "unfold"}:durable:native:group:focus`),
-      setSurfacePinned: async (pinned) =>
-        events.push(`${pinned ? "pin" : "unpin"}:native:durable:registry:focus`),
-      relinkSurface: async () => events.push("group:native:focus"),
-    },
+    timerBindings(events),
     async () => false,
     (outcome) => outcomes.push(outcome),
   );
@@ -143,9 +199,17 @@ test("production timer listener keeps shared actions direct and rejects note-onl
   await listener.dispatch({ type: "snap", direction: "Left", partial: false });
 
   assert.deepEqual(events, [
-    "delete:group:native-close:focus",
-    "fold:durable:native:group:focus",
-    "pin:native:durable:registry:focus",
+    { step: "invoke", command: "close_window", args: undefined },
+    {
+      step: "invoke",
+      command: "set_collapsed",
+      args: { collapsed: true },
+    },
+    {
+      step: "invoke",
+      command: "set_timer_always_on_top",
+      args: { alwaysOnTop: true },
+    },
   ]);
   assert.deepEqual(outcomes, [
     { status: "succeeded" },
@@ -156,93 +220,84 @@ test("production timer listener keeps shared actions direct and rejects note-onl
   ]);
 });
 
-test("production listener renders flush and downstream failures without later mutation", async () => {
-  for (const failedStep of ["flush", "group", "pin", "snap"]) {
+test("every production note command failure is rendered as one outcome", async () => {
+  const cases = [
+    { failedStep: "flush", perform: (input) => input.close() },
+    { failedStep: "close_window", perform: (input) => input.close() },
+    { failedStep: "set_collapsed", perform: (input) => input.fold() },
+    { failedStep: "set_note_always_on_top", perform: (input) => input.pin() },
+    {
+      failedStep: "link_windows_on_this_side_below_current_window",
+      perform: (input) => input.relink(),
+    },
+    {
+      failedStep: "change_font_size",
+      perform: (input) => input.changeFontSize(true),
+    },
+    {
+      failedStep: "snap_window",
+      perform: (input) => input.snap("Down", true),
+    },
+  ];
+
+  for (const { failedStep, perform } of cases) {
     const events = [];
     const outcomes = [];
-    const listener = memoryListener();
+    const message = `${failedStep} failed`;
     const input = createNoteUserActionInput(
-      noteDependencies(events, new Set([failedStep])),
+      noteBindings(events, new Map([[failedStep, message]])),
       async () => true,
       (outcome) => outcomes.push(outcome),
     );
-    await registerUserActionRequestListener(listener.target, input);
 
-    const payload =
-      failedStep === "group"
-        ? "relink"
-        : failedStep === "pin"
-          ? "pin"
-          : failedStep === "snap"
-            ? { type: "snap", direction: "Down", partial: true }
-            : "close";
-    await listener.dispatch(payload);
-
-    assert.deepEqual(outcomes, [
-      { status: "failed", message: `${failedStep} failed` },
-    ]);
-    if (failedStep === "flush") assert.deepEqual(events, ["flush"]);
+    assert.deepEqual(await perform(input), { status: "failed", message });
+    assert.deepEqual(outcomes, [{ status: "failed", message }]);
+    if (failedStep === "flush") {
+      assert.deepEqual(events, [{ step: "flush", color: undefined }]);
+    }
   }
 });
 
-test("production seam renders missing targets, cancellation, and transaction compensation failures", async () => {
-  const missingOutcomes = [];
-  const missing = createNoteUserActionInput(
-    () => undefined,
-    async () => true,
-    (outcome) => missingOutcomes.push(outcome),
-  );
-  assert.deepEqual(await missing.close(), {
-    status: "failed",
-    message: "No valid note or timer target",
-  });
-  assert.deepEqual(missingOutcomes, [
-    { status: "failed", message: "No valid note or timer target" },
-  ]);
-
+test("cancellation and transaction compensation failures retain one outcome", async () => {
   const events = [];
   const outcomes = [];
-  const dependencies = noteDependencies(events);
-  dependencies.setSurfacePinned = async () => {
-    events.push("pin transaction");
-    throw new Error("registry failed; compensation failed: durable rollback failed");
-  };
+  const message =
+    "registry failed; compensation failed: durable rollback failed";
   const input = createNoteUserActionInput(
-    dependencies,
+    noteBindings(events, new Map([["set_note_always_on_top", message]])),
     async () => false,
     (outcome) => outcomes.push(outcome),
   );
 
   assert.deepEqual(await input.relink(), { status: "cancelled" });
-  assert.deepEqual(await input.pin(), {
-    status: "failed",
-    message: "registry failed; compensation failed: durable rollback failed",
-  });
-  assert.deepEqual(events, ["flush", "pin transaction"]);
+  assert.deepEqual(await input.pin(), { status: "failed", message });
+  assert.deepEqual(events, [
+    { step: "flush", color: undefined },
+    {
+      step: "invoke",
+      command: "set_note_always_on_top",
+      args: { alwaysOnTop: true },
+    },
+  ]);
   assert.deepEqual(outcomes, [
     { status: "cancelled" },
-    {
-      status: "failed",
-      message: "registry failed; compensation failed: durable rollback failed",
-    },
+    { status: "failed", message },
   ]);
 });
 
-test("production listener preserves stable targeting and renders busy outcomes", async () => {
+test("production listener renders busy without starting a second command", async () => {
+  const events = [];
   const outcomes = [];
   const listener = memoryListener();
   let release;
-  let focusedEvents = [];
-  const first = noteDependencies(focusedEvents);
-  first.flushPendingContent = () =>
+  const bindings = noteBindings(events);
+  bindings.flushPendingContent = () =>
     new Promise((resolve) => {
-      focusedEvents.push("first flush");
+      events.push({ step: "flush" });
       release = resolve;
     });
-  const secondEvents = [];
-  let focused = first;
   const input = createNoteUserActionInput(
-    () => focused,
+    bindings,
     async () => true,
     (outcome) => outcomes.push(outcome),
   );
@@ -250,16 +305,14 @@ test("production listener preserves stable targeting and renders busy outcomes",
 
   const firstRequest = listener.dispatch("close");
   await new Promise((resolve) => setImmediate(resolve));
-  focused = noteDependencies(secondEvents);
   await listener.dispatch("close");
   release();
   await firstRequest;
 
-  assert.deepEqual(focusedEvents, [
-    "first flush",
-    "archive:group:native-close:focus",
+  assert.deepEqual(events, [
+    { step: "flush" },
+    { step: "invoke", command: "close_window", args: undefined },
   ]);
-  assert.deepEqual(secondEvents, []);
   assert.deepEqual(outcomes, [
     { status: "busy", message: "Another user action is already running" },
     { status: "succeeded" },

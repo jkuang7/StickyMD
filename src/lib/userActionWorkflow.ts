@@ -1,3 +1,5 @@
+import type { Event } from "@tauri-apps/api/event";
+
 export type UserAction =
   | "close"
   | "fold"
@@ -17,7 +19,7 @@ export type UserActionOutcome =
   | { status: "busy"; message: string }
   | { status: "failed"; message: string };
 
-export interface SurfaceActionAdapter {
+interface SurfaceActionAdapter {
   close(): Promise<void>;
   setCollapsed(collapsed: boolean): Promise<void>;
   setPinned(pinned: boolean): Promise<void>;
@@ -31,7 +33,7 @@ export interface UserActionWorkflow {
   perform(action: UserAction): Promise<UserActionOutcome>;
 }
 
-export type ResolveTarget = () =>
+type ResolveTarget = () =>
   | SurfaceActionAdapter
   | undefined
   | Promise<SurfaceActionAdapter | undefined>;
@@ -40,6 +42,36 @@ const RELINK_CONFIRMATION = "Are you sure you want to link these windows?";
 
 function failureMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isUserAction(action: unknown): action is UserAction {
+  if (
+    action === "close" ||
+    action === "fold" ||
+    action === "unfold" ||
+    action === "pin" ||
+    action === "unpin" ||
+    action === "relink"
+  ) {
+    return true;
+  }
+  if (!action || typeof action !== "object" || !("type" in action)) {
+    return false;
+  }
+
+  const request = action as Record<string, unknown>;
+  if (request.type === "set-color") return typeof request.color === "string";
+  if (request.type === "change-font-size") {
+    return typeof request.increase === "boolean";
+  }
+  return (
+    request.type === "snap" &&
+    (request.direction === "Up" ||
+      request.direction === "Down" ||
+      request.direction === "Left" ||
+      request.direction === "Right") &&
+    typeof request.partial === "boolean"
+  );
 }
 
 /**
@@ -115,16 +147,9 @@ export function createUserActionWorkflow(
   };
 }
 
-export function createNoteActionAdapter(dependencies: {
-  flushPendingContent(color?: string): Promise<unknown>;
-  closeSurface(): Promise<unknown>;
-  setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
-  setSurfacePinned(pinned: boolean): Promise<unknown>;
-  relinkSurface(): Promise<unknown>;
-  setSurfaceColor(color: string): Promise<unknown>;
-  changeSurfaceFontSize(increase: boolean): Promise<unknown>;
-  snapSurface(direction: SnapDirection, partial: boolean): Promise<unknown>;
-}): SurfaceActionAdapter {
+export function createNoteActionAdapter(
+  dependencies: NoteActionDependencies,
+): SurfaceActionAdapter {
   return {
     async close() {
       await dependencies.flushPendingContent();
@@ -157,12 +182,9 @@ export function createNoteActionAdapter(dependencies: {
   };
 }
 
-export function createTimerActionAdapter(dependencies: {
-  closeSurface(): Promise<unknown>;
-  setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
-  setSurfacePinned(pinned: boolean): Promise<unknown>;
-  relinkSurface(): Promise<unknown>;
-}): SurfaceActionAdapter {
+export function createTimerActionAdapter(
+  dependencies: TimerActionDependencies,
+): SurfaceActionAdapter {
   return {
     async close() {
       await dependencies.closeSurface();
@@ -194,7 +216,9 @@ export function createUserActionInputAdapter(
   render: (outcome: UserActionOutcome) => void,
 ) {
   async function perform(action: UserAction) {
-    const outcome = await workflow.perform(action);
+    const outcome = isUserAction(action)
+      ? await workflow.perform(action)
+      : { status: "failed" as const, message: "Invalid user action request" };
     render(outcome);
     return outcome;
   }
@@ -217,7 +241,7 @@ export function createUserActionInputAdapter(
 
 export const USER_ACTION_REQUEST_EVENT = "user_action_requested";
 
-export interface NoteActionDependencies {
+interface NoteActionDependencies {
   flushPendingContent(color?: string): Promise<unknown>;
   closeSurface(): Promise<unknown>;
   setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
@@ -228,46 +252,77 @@ export interface NoteActionDependencies {
   snapSurface(direction: SnapDirection, partial: boolean): Promise<unknown>;
 }
 
-export interface TimerActionDependencies {
+interface TimerActionDependencies {
   closeSurface(): Promise<unknown>;
   setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
   setSurfacePinned(pinned: boolean): Promise<unknown>;
   relinkSurface(): Promise<unknown>;
 }
 
-type DependencyResolver<T> = T | (() => T | undefined | Promise<T | undefined>);
 type ConfirmRelink = (message: string) => Promise<boolean>;
 type RenderOutcome = (outcome: UserActionOutcome) => void;
 
-function resolve<T>(dependencies: DependencyResolver<T>) {
-  return typeof dependencies === "function"
-    ? (dependencies as () => T | undefined | Promise<T | undefined>)()
-    : dependencies;
+type Invoke = (
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+export interface NoteUserActionBindings {
+  invoke: Invoke;
+  flushPendingContent(color?: string): Promise<unknown>;
+  prepareToCollapse(): void;
+  displayColor(color: string): void;
+}
+
+export interface TimerUserActionBindings {
+  invoke: Invoke;
 }
 
 /** Compose the exact workflow and note adapter used by production callers. */
 export function createNoteUserActionInput(
-  dependencies: DependencyResolver<NoteActionDependencies>,
+  bindings: NoteUserActionBindings,
   confirmRelink: ConfirmRelink,
   render: RenderOutcome,
 ) {
-  const workflow = createUserActionWorkflow(async () => {
-    const target = await resolve(dependencies);
-    return target ? createNoteActionAdapter(target) : undefined;
-  }, confirmRelink);
+  const target = createNoteActionAdapter({
+    flushPendingContent: bindings.flushPendingContent,
+    closeSurface: () => bindings.invoke("close_window"),
+    async setSurfaceCollapsed(collapsed) {
+      if (collapsed) bindings.prepareToCollapse();
+      await bindings.invoke("set_collapsed", { collapsed });
+    },
+    setSurfacePinned: (pinned) =>
+      bindings.invoke("set_note_always_on_top", { alwaysOnTop: pinned }),
+    relinkSurface: () =>
+      bindings.invoke("link_windows_on_this_side_below_current_window"),
+    async setSurfaceColor(color) {
+      bindings.displayColor(color);
+    },
+    changeSurfaceFontSize: (increase) =>
+      bindings.invoke("change_font_size", { increase }),
+    snapSurface: (direction, partial) =>
+      bindings.invoke("snap_window", { direction, partial }),
+  });
+  const workflow = createUserActionWorkflow(() => target, confirmRelink);
   return createUserActionInputAdapter(workflow, render);
 }
 
 /** Compose the exact workflow and timer adapter used by production callers. */
 export function createTimerUserActionInput(
-  dependencies: DependencyResolver<TimerActionDependencies>,
+  bindings: TimerUserActionBindings,
   confirmRelink: ConfirmRelink,
   render: RenderOutcome,
 ) {
-  const workflow = createUserActionWorkflow(async () => {
-    const target = await resolve(dependencies);
-    return target ? createTimerActionAdapter(target) : undefined;
-  }, confirmRelink);
+  const target = createTimerActionAdapter({
+    closeSurface: () => bindings.invoke("close_window"),
+    setSurfaceCollapsed: (collapsed) =>
+      bindings.invoke("set_collapsed", { collapsed }),
+    setSurfacePinned: (pinned) =>
+      bindings.invoke("set_timer_always_on_top", { alwaysOnTop: pinned }),
+    relinkSurface: () =>
+      bindings.invoke("link_windows_on_this_side_below_current_window"),
+  });
+  const workflow = createUserActionWorkflow(() => target, confirmRelink);
   return createUserActionInputAdapter(workflow, render);
 }
 
@@ -287,4 +342,3 @@ export function registerUserActionRequestListener(
     await input.perform(event.payload);
   });
 }
-import type { Event } from "@tauri-apps/api/event";
