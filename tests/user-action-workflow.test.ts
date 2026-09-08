@@ -14,6 +14,7 @@ test("note close flushes before lifecycle mutation", async () => {
   const target = createNoteActionAdapter({
     flushPendingContent: async () => events.push("flush"),
     closeSurface: async () => events.push("archive-and-close"),
+    setSurfaceCollapsed: async () => undefined,
   });
   const workflow = createUserActionWorkflow(() => target);
 
@@ -29,6 +30,7 @@ test("failed note flush prevents lifecycle mutation", async () => {
       throw new Error("save unavailable");
     },
     closeSurface: async () => events.push("archive-and-close"),
+    setSurfaceCollapsed: async () => undefined,
   });
   const workflow = createUserActionWorkflow(() => target);
 
@@ -39,6 +41,41 @@ test("failed note flush prevents lifecycle mutation", async () => {
   assert.deepEqual(events, ["flush"]);
 });
 
+test("note fold and unfold flush before durable and native mutation", async () => {
+  const events: string[] = [];
+  const target = createNoteActionAdapter({
+    flushPendingContent: async () => events.push("flush"),
+    closeSurface: async () => events.push("archive-and-close"),
+    setSurfaceCollapsed: async (collapsed) =>
+      events.push(collapsed ? "fold" : "unfold"),
+  });
+  const workflow = createUserActionWorkflow(() => target);
+
+  assert.deepEqual(await workflow.perform("fold"), { status: "succeeded" });
+  assert.deepEqual(await workflow.perform("unfold"), { status: "succeeded" });
+  assert.deepEqual(events, ["flush", "fold", "flush", "unfold"]);
+});
+
+test("failed note flush prevents fold and unfold mutation", async () => {
+  const mutations: boolean[] = [];
+  const target = createNoteActionAdapter({
+    flushPendingContent: async () => {
+      throw new Error("save unavailable");
+    },
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async (collapsed) => mutations.push(collapsed),
+  });
+  const workflow = createUserActionWorkflow(() => target);
+
+  for (const action of ["fold", "unfold"]) {
+    assert.deepEqual(await workflow.perform(action), {
+      status: "failed",
+      message: "save unavailable",
+    });
+  }
+  assert.deepEqual(mutations, []);
+});
+
 test("lifecycle and compensation failures stay one workflow failure", async () => {
   let attempts = 0;
   const target = createNoteActionAdapter({
@@ -47,6 +84,7 @@ test("lifecycle and compensation failures stay one workflow failure", async () =
       attempts += 1;
       throw new Error("close failed; rollback also failed");
     },
+    setSurfaceCollapsed: async () => undefined,
   });
   const workflow = createUserActionWorkflow(() => target);
 
@@ -63,11 +101,26 @@ test("timer close skips note persistence", async () => {
   const events: string[] = [];
   const target = createTimerActionAdapter({
     closeSurface: async () => events.push("stop-delete-and-close"),
+    setSurfaceCollapsed: async () => undefined,
   });
   const workflow = createUserActionWorkflow(() => target);
 
   assert.deepEqual(await workflow.perform("close"), { status: "succeeded" });
   assert.deepEqual(events, ["stop-delete-and-close"]);
+});
+
+test("timer fold and unfold mutate directly without note persistence", async () => {
+  const collapsedStates: boolean[] = [];
+  const target = createTimerActionAdapter({
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: async (collapsed) =>
+      collapsedStates.push(collapsed),
+  });
+  const workflow = createUserActionWorkflow(() => target);
+
+  assert.deepEqual(await workflow.perform("fold"), { status: "succeeded" });
+  assert.deepEqual(await workflow.perform("unfold"), { status: "succeeded" });
+  assert.deepEqual(collapsedStates, [true, false]);
 });
 
 test("the resolved target stays fixed while an asynchronous close is running", async () => {
@@ -80,9 +133,11 @@ test("the resolved target stays fixed while an asynchronous close is running", a
         releaseFlush = resolve;
       }),
     closeSurface: async () => events.push("first close"),
+    setSurfaceCollapsed: async () => undefined,
   });
   const second = createTimerActionAdapter({
     closeSurface: async () => events.push("second close"),
+    setSurfaceCollapsed: async () => undefined,
   });
   let resolutions = 0;
   const workflow = createUserActionWorkflow(() => {
@@ -115,6 +170,7 @@ test("missing targets and duplicate input do not mutate a surface", async () => 
         closes += 1;
         release = resolve;
       }),
+    setSurfaceCollapsed: async () => undefined,
   });
   const workflow = createUserActionWorkflow(() => target);
   const first = workflow.perform("close");
@@ -152,4 +208,40 @@ test("the shared input adapter maps close and renders every workflow outcome", a
   assert.deepEqual(await adapter.close(), outcomes[2]);
   assert.deepEqual(actions, ["close", "close", "close"]);
   assert.deepEqual(rendered, outcomes);
+});
+
+test("the shared input adapter routes fold and unfold through the workflow", async () => {
+  const actions: string[] = [];
+  const workflow = {
+    async perform(action) {
+      actions.push(action);
+      return { status: "succeeded" };
+    },
+  };
+  const adapter = createUserActionInputAdapter(workflow, () => undefined);
+
+  assert.deepEqual(await adapter.fold(), { status: "succeeded" });
+  assert.deepEqual(await adapter.unfold(), { status: "succeeded" });
+  assert.deepEqual(actions, ["fold", "unfold"]);
+});
+
+test("fold shares the workflow busy policy with every other action", async () => {
+  let release!: () => void;
+  const target = createTimerActionAdapter({
+    closeSurface: async () => undefined,
+    setSurfaceCollapsed: () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  });
+  const workflow = createUserActionWorkflow(() => target);
+  const fold = workflow.perform("fold");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(await workflow.perform("close"), {
+    status: "busy",
+    message: "Another user action is already running",
+  });
+  release();
+  assert.deepEqual(await fold, { status: "succeeded" });
 });

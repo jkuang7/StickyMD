@@ -1,4 +1,4 @@
-export type UserAction = "close";
+export type UserAction = "close" | "fold" | "unfold";
 
 export type UserActionOutcome =
   | { status: "succeeded" }
@@ -7,6 +7,7 @@ export type UserActionOutcome =
 
 interface SurfaceActionAdapter {
   close(): Promise<void>;
+  setCollapsed(collapsed: boolean): Promise<void>;
 }
 
 export interface UserActionWorkflow {
@@ -50,6 +51,12 @@ export function createUserActionWorkflow(
           case "close":
             await target.close();
             return { status: "succeeded" };
+          case "fold":
+            await target.setCollapsed(true);
+            return { status: "succeeded" };
+          case "unfold":
+            await target.setCollapsed(false);
+            return { status: "succeeded" };
         }
       } catch (error) {
         return { status: "failed", message: failureMessage(error) };
@@ -63,21 +70,30 @@ export function createUserActionWorkflow(
 export function createNoteActionAdapter(dependencies: {
   flushPendingContent(): Promise<unknown>;
   closeSurface(): Promise<unknown>;
+  setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
 }): SurfaceActionAdapter {
   return {
     async close() {
       await dependencies.flushPendingContent();
       await dependencies.closeSurface();
     },
+    async setCollapsed(collapsed) {
+      await dependencies.flushPendingContent();
+      await dependencies.setSurfaceCollapsed(collapsed);
+    },
   };
 }
 
 export function createTimerActionAdapter(dependencies: {
   closeSurface(): Promise<unknown>;
+  setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
 }): SurfaceActionAdapter {
   return {
     async close() {
       await dependencies.closeSurface();
+    },
+    async setCollapsed(collapsed) {
+      await dependencies.setSurfaceCollapsed(collapsed);
     },
   };
 }
@@ -87,11 +103,15 @@ export function createUserActionInputAdapter(
   workflow: UserActionWorkflow,
   render: (outcome: UserActionOutcome) => void,
 ) {
+  async function perform(action: UserAction) {
+    const outcome = await workflow.perform(action);
+    render(outcome);
+    return outcome;
+  }
+
   return {
-    async close() {
-      const outcome = await workflow.perform("close");
-      render(outcome);
-      return outcome;
-    },
+    close: () => perform("close"),
+    fold: () => perform("fold"),
+    unfold: () => perform("unfold"),
   };
 }

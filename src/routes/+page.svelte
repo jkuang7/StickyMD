@@ -110,6 +110,8 @@
         await editor.flushSave();
       },
       closeSurface: () => invoke("close_window"),
+      setSurfaceCollapsed: (next) =>
+        invoke("set_collapsed", { collapsed: next }),
     }),
   );
   const userActionInput = createUserActionInputAdapter(
@@ -124,7 +126,6 @@
   }
 
   async function toggleCollapsed() {
-    await editor?.flushSave();
     const next = !collapsed;
     if (next) {
       if (fontResizeFrame !== undefined) {
@@ -134,7 +135,11 @@
       fontResizeRevision += 1;
       fontResizeBaseline = undefined;
     }
-    await invoke("set_collapsed", { collapsed: next });
+    const outcome = next
+      ? await userActionInput.fold()
+      : await userActionInput.unfold();
+    if (outcome.status !== "succeeded") return outcome;
+
     collapsed = next;
     colorMenuOpen = false;
     if (!collapsed) {
@@ -146,6 +151,7 @@
         }
       });
     }
+    return outcome;
   }
 
   function toggleColorMenu() {
@@ -234,7 +240,10 @@
       event.preventDefault();
       event.stopPropagation();
       void (async () => {
-        if (collapsed) await toggleCollapsed();
+        if (collapsed) {
+          const outcome = await toggleCollapsed();
+          if (outcome?.status !== "succeeded") return;
+        }
         requestAnimationFrame(() => editor?.openFind());
       })();
     }

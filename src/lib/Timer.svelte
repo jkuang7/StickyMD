@@ -312,6 +312,8 @@
   const userActionWorkflow = createUserActionWorkflow(() =>
     createTimerActionAdapter({
       closeSurface: () => invoke("close_window"),
+      setSurfaceCollapsed: (next) =>
+        invoke("set_collapsed", { collapsed: next }),
     }),
   );
   const userActionInput = createUserActionInputAdapter(
@@ -337,14 +339,14 @@
   async function toggleCollapsed() {
     if (busy) return;
     const next = !collapsed;
-    errorMessage = "";
+    const outcome = next
+      ? await userActionInput.fold()
+      : await userActionInput.unfold();
+    if (outcome.status !== "succeeded") return outcome;
+
+    collapsed = next;
     settingsOpen = false;
-    try {
-      await invoke("set_collapsed", { collapsed: next });
-      collapsed = next;
-    } catch (error) {
-      errorMessage = String(error);
-    }
+    return outcome;
   }
 
   async function linkWindowsOnThisSide() {
@@ -363,13 +365,9 @@
 
   async function toggleSettings() {
     if (!settingsOpen && collapsed) {
-      try {
-        await invoke("set_collapsed", { collapsed: false });
-        collapsed = false;
-      } catch (error) {
-        errorMessage = String(error);
-        return;
-      }
+      const outcome = await userActionInput.unfold();
+      if (outcome.status !== "succeeded") return;
+      collapsed = false;
     }
     if (!settingsOpen) refreshSoundFields();
     errorMessage = "";
