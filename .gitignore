@@ -16,3 +16,6 @@ vite.config.ts.timestamp-*
 /.sandcastle/*
 !/.sandcastle/verification.json
 /src-tauri/target-sandcastle/
+
+# Local research, PR drafts, and scratch artifacts
+/.scratch/
