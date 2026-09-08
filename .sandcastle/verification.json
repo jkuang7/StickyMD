@@ -2,12 +2,12 @@
   "slice": [
     "npm run check",
     "npm test",
-    "cd src-tauri && CARGO_TARGET_DIR=target-sandcastle cargo test"
+    "cd src-tauri && CARGO_TARGET_DIR=/tmp/stickymd-target-sandcastle cargo test"
   ],
   "full": [
     "npm run check",
     "npm test",
-    "cd src-tauri && CARGO_TARGET_DIR=target-sandcastle cargo test",
+    "cd src-tauri && CARGO_TARGET_DIR=/tmp/stickymd-target-sandcastle cargo test",
     "npm run build"
   ]
 }
