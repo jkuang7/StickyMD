@@ -683,32 +683,39 @@ fn persist_store(
     store: &NoteStore,
     rotate_current: bool,
 ) -> anyhow::Result<()> {
-    let parent = path.parent().context("Note storage path has no parent")?;
-    fs::create_dir_all(parent).context("Failed to create note storage directory")?;
     let bytes = serde_json::to_vec_pretty(store).context("Failed to serialize note storage")?;
-    let new_path = temporary_path(parent, NOTES_DATA);
-
-    let result = (|| -> anyhow::Result<()> {
-        write_bytes(&new_path, &bytes, true).context("Failed to write temporary note storage")?;
-
+    write_atomic_before_replace(path, &bytes, || {
         if rotate_current && path.exists() {
             let current_bytes = fs::read(path).context("Failed to read current note snapshot")?;
             parse_store(&current_bytes).context("Refusing to rotate an invalid current store")?;
-            let previous_temp = temporary_path(parent, PREVIOUS_NOTES_DATA);
-            let rotate_result = (|| -> anyhow::Result<()> {
-                write_bytes(&previous_temp, &current_bytes, true)
-                    .context("Failed to write previous note snapshot")?;
-                fs::rename(&previous_temp, previous_path)
-                    .context("Failed to atomically replace previous note snapshot")?;
-                Ok(())
-            })();
-            if rotate_result.is_err() {
-                let _ = fs::remove_file(&previous_temp);
-            }
-            rotate_result?;
+            write_atomic(previous_path, &current_bytes)
+                .context("Failed to atomically replace previous note snapshot")?;
         }
+        Ok(())
+    })
+}
 
-        fs::rename(&new_path, path).context("Failed to atomically replace note storage")?;
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    write_atomic_before_replace(path, bytes, || Ok(()))
+}
+
+fn write_atomic_before_replace(
+    path: &Path,
+    bytes: &[u8],
+    before_replace: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let parent = path.parent().context("Storage path has no parent")?;
+    let name = path
+        .file_name()
+        .context("Storage path has no filename")?
+        .to_string_lossy();
+    fs::create_dir_all(parent).context("Failed to create storage directory")?;
+    let new_path = temporary_path(parent, &name);
+
+    let result = (|| -> anyhow::Result<()> {
+        write_bytes(&new_path, bytes, true).context("Failed to write temporary storage")?;
+        before_replace()?;
+        fs::rename(&new_path, path).context("Failed to atomically replace storage")?;
         sync_directory(parent);
         Ok(())
     })();
@@ -1326,6 +1333,29 @@ mod tests {
         let reloaded = NoteRepository::load_from_dir(&dir).unwrap();
         assert_eq!(reloaded.get(&first.id).unwrap().font_size, 22);
         assert_eq!(reloaded.get(&second.id).unwrap().font_size, 28);
+        cleanup(dir);
+    }
+
+    #[test]
+    fn failure_after_staging_preserves_previous_bytes_and_removes_temporary_file() {
+        let dir = temp_dir("failed-atomic-replacement");
+        let path = dir.join("timers.json");
+        let previous = br#"{"version":2,"timers":{}}"#;
+        fs::write(&path, previous).unwrap();
+        let result = write_atomic_before_replace(&path, b"candidate", || {
+            assert_eq!(fs::read(&path).unwrap(), previous);
+            let staged: Vec<_> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|entry| entry != &path)
+                .collect();
+            assert_eq!(staged.len(), 1);
+            assert_eq!(fs::read(&staged[0]).unwrap(), b"candidate");
+            bail!("Forced failure before replacement")
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), previous);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         cleanup(dir);
     }
 
