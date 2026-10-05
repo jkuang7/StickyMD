@@ -1,0 +1,1 @@
+{"typecheck":["npm","run","check"],"test":["sh","-c","npm test && CARGO_TARGET_DIR=/tmp/stickymd-sandcastle-target cargo test --manifest-path src-tauri/Cargo.toml"]}
