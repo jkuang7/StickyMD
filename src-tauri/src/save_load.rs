@@ -453,16 +453,15 @@ impl NoteRepository {
         .map(Some)
     }
 
-    #[cfg(test)]
-    pub fn restore_all_closed(&self) -> anyhow::Result<usize> {
+    pub fn restore_all_archived(&self) -> anyhow::Result<usize> {
         let mut restored_count = 0;
-        self.mutate(|store| {
+        self.mutate_if_changed(|store| {
             for note in store.notes.values_mut() {
                 if note.closed_at.take().is_some() {
                     restored_count += 1;
                 }
             }
-            Ok(())
+            Ok(restored_count > 0)
         })?;
         Ok(restored_count)
     }
@@ -961,6 +960,49 @@ mod tests {
     }
 
     #[test]
+    fn restore_all_commit_failure_preserves_every_archive_on_disk_and_in_memory() {
+        let dir = temp_dir("restore-all-failed-commit");
+        let repository = NoteRepository::load_from_dir(&dir).unwrap();
+        let first = repository.all().unwrap()[0].clone();
+        let second = repository.create_with_font_size(DEFAULT_FONT_SIZE).unwrap();
+        let now = current_time_millis().unwrap();
+        for (id, timestamp) in [(&first.id, now - 1), (&second.id, now)] {
+            repository
+                .update(id, |note| {
+                    note.closed_at = Some(timestamp);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let original = repository.all().unwrap();
+        let bytes = fs::read(&repository.path).unwrap();
+        fs::remove_file(&repository.previous_path).unwrap();
+        fs::create_dir(&repository.previous_path).unwrap();
+        assert!(repository.restore_all_archived().is_err());
+        assert_eq!(repository.all().unwrap(), original);
+        assert_eq!(fs::read(&repository.path).unwrap(), bytes);
+        assert_eq!(
+            NoteRepository::load_from_dir(&dir).unwrap().all().unwrap(),
+            original
+        );
+        fs::remove_dir(&repository.previous_path).unwrap();
+        assert_eq!(repository.restore_all_archived().unwrap(), 2);
+        assert!(repository
+            .all()
+            .unwrap()
+            .iter()
+            .all(|note| note.closed_at.is_none()));
+        assert_eq!(
+            NoteRepository::load_from_dir(&dir).unwrap().all().unwrap(),
+            repository.all().unwrap()
+        );
+        fs::remove_file(&repository.previous_path).unwrap();
+        fs::create_dir(&repository.previous_path).unwrap();
+        assert_eq!(repository.restore_all_archived().unwrap(), 0);
+        cleanup(dir);
+    }
+
+    #[test]
     fn expired_archives_are_purged_and_restore_all_recovers_the_rest() {
         let dir = temp_dir("archive-retention-and-restore-all");
         let repository = NoteRepository::load_from_dir(&dir).unwrap();
@@ -984,7 +1026,7 @@ mod tests {
 
         let reloaded = NoteRepository::load_from_dir(&dir).unwrap();
         assert!(reloaded.get(&expired.id).is_err());
-        assert_eq!(reloaded.restore_all_closed().unwrap(), 1);
+        assert_eq!(reloaded.restore_all_archived().unwrap(), 1);
         let active_ids: std::collections::BTreeSet<_> = reloaded
             .active()
             .unwrap()
