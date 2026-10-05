@@ -58,6 +58,57 @@ struct QuitProgress {
 #[derive(Default)]
 pub struct QuitCoordinator(Mutex<QuitProgress>);
 
+#[cfg(target_os = "macos")]
+pub fn coordinate_native_quit(app: &tauri::AppHandle) -> anyhow::Result<()> {
+    use objc2::{
+        ffi::class_addMethod,
+        msg_send,
+        runtime::{AnyClass, AnyObject, Imp, Sel},
+        sel, MainThreadMarker,
+    };
+    use objc2_app_kit::NSApplication;
+    use std::sync::OnceLock;
+
+    static QUIT_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+    unsafe extern "C-unwind" fn request_coordinated_quit(
+        _: &AnyObject,
+        _: Sel,
+        _: &AnyObject,
+    ) -> usize {
+        if let Some(app) = QUIT_APP.get() {
+            app.exit(0);
+        }
+        0
+    }
+
+    let main_thread = MainThreadMarker::new()
+        .ok_or_else(|| anyhow::anyhow!("Native quit must be configured on the main thread"))?;
+    let application = NSApplication::sharedApplication(main_thread);
+    let delegate: *mut AnyObject = unsafe { msg_send![&*application, delegate] };
+    let delegate = unsafe { delegate.as_ref() }
+        .ok_or_else(|| anyhow::anyhow!("Native application delegate is unavailable"))?;
+    QUIT_APP
+        .set(app.clone())
+        .map_err(|_| anyhow::anyhow!("Native quit is already configured"))?;
+    let callback: unsafe extern "C-unwind" fn(&AnyObject, Sel, &AnyObject) -> usize =
+        request_coordinated_quit;
+    let implementation: Imp = unsafe { std::mem::transmute(callback) };
+    let installed = unsafe {
+        class_addMethod(
+            delegate.class() as *const AnyClass as *mut AnyClass,
+            sel!(applicationShouldTerminate:),
+            implementation,
+            c"Q@:@".as_ptr(),
+        )
+    };
+    anyhow::ensure!(
+        installed.as_bool(),
+        "Could not coordinate native application quit"
+    );
+    Ok(())
+}
+
 impl QuitCoordinator {
     pub fn begin(&self, labels: HashSet<String>) -> anyhow::Result<Option<u64>> {
         let mut progress = self

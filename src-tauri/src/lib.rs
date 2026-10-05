@@ -30,6 +30,9 @@ mod user_action_workflow;
 mod windows;
 
 fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    coordinate_native_quit(app.handle())?;
+
     let repository = NoteRepository::load(app.handle())?;
     app.manage(repository);
 
