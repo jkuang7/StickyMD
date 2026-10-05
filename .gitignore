@@ -14,7 +14,6 @@ vite.config.ts.timestamp-*
 
 # Sandcastle runtime state, worktrees, and build artifacts
 /.sandcastle/*
-!/.sandcastle/verification.json
 /src-tauri/target-sandcastle/
 
 # Local research, PR drafts, and scratch artifacts
