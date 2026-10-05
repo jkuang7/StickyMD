@@ -744,7 +744,12 @@ pub fn restore_last_closed(app: &AppHandle) -> Result<(), anyhow::Error> {
 }
 
 pub fn restore_all_notes(app: &AppHandle) -> Result<(), anyhow::Error> {
-    crate::groups::restore_all_notes(app)
+    crate::groups::restore_all_notes(app).map_err(|error| {
+        AppNativeUserActionTransport { app }.render(&UserActionOutcome::Failed {
+            message: format!("{error:#}"),
+        });
+        error
+    })
 }
 
 pub(crate) fn restore_every<T>(

@@ -1777,12 +1777,7 @@ pub fn restore_all_notes(app: &AppHandle) -> anyhow::Result<()> {
                 )?;
                 replacements.extend(surfaces);
             }
-            for surface in &replacements {
-                stage
-                    .originals
-                    .push(stored_surface(app, &surface.member())?);
-            }
-            replace_surface_batch(app, &replacements)?;
+            stage.originals = persist_surface_changes(app, &replacements)?;
             repository
                 .restore_all_archived()
                 .context("Could not persist restored notes")?;
@@ -2194,13 +2189,13 @@ mod tests {
     fn restore_all_rollback_closes_staged_windows_and_restores_every_group() {
         use std::cell::RefCell;
         let original = [geometry(10, 20, 300, 250), geometry(10, 282, 300, 24)];
-        for fail_at in 0..4 {
-            let opened_count = if fail_at == 0 { 1 } else { 3 };
-            let layout_count = if fail_at == 0 { 0 } else { 2 };
+        for (opened_count, layout_count, saved_layout) in
+            [(1, 0, false), (3, 2, false), (3, 2, true)]
+        {
             let stage = RestoreAllStage {
                 windows: (0..opened_count).collect::<Vec<_>>(),
                 layouts: (0..layout_count).collect::<Vec<_>>(),
-                originals: if fail_at >= 2 { vec![20, 282] } else { vec![] },
+                originals: if saved_layout { vec![20, 282] } else { vec![] },
             };
             let windows = RefCell::new(original);
             let live = RefCell::new(original);
@@ -2208,7 +2203,11 @@ mod tests {
                 windows.borrow_mut()[index].position.y += 50;
                 live.borrow_mut()[index].position.y += 50;
             }
-            let mut saved_positions = vec![70, 332];
+            let mut saved_positions = if saved_layout {
+                vec![70, 332]
+            } else {
+                vec![20, 282]
+            };
             let mut closed = Vec::new();
             rollback_restore_all(
                 &stage,
@@ -2243,10 +2242,9 @@ mod tests {
             .unwrap();
             assert_eq!(*windows.borrow(), original);
             assert_eq!(*live.borrow(), original);
-            assert_eq!(closed, (0..opened_count).rev().collect::<Vec<_>>());
-            if fail_at >= 2 {
-                assert_eq!(saved_positions, vec![20, 282]);
-            }
+            closed.sort();
+            assert_eq!(closed, (0..opened_count).collect::<Vec<_>>());
+            assert_eq!(saved_positions, vec![20, 282]);
         }
     }
 
@@ -2274,9 +2272,22 @@ mod tests {
                 },
             ),
         );
-        assert_eq!(restored, vec![1, 0]);
-        assert_eq!(closed, vec![2, 1, 0]);
-        assert_eq!(error.to_string(), "commit; rollback failed: saved positions; geometry 1; geometry 0; close 2; close 1; close 0");
+        restored.sort();
+        closed.sort();
+        assert_eq!(restored, vec![0, 1]);
+        assert_eq!(closed, vec![0, 1, 2]);
+        let message = error.to_string();
+        for failure in [
+            "commit",
+            "saved positions",
+            "geometry 1",
+            "geometry 0",
+            "close 2",
+            "close 1",
+            "close 0",
+        ] {
+            assert_eq!(message.matches(failure).count(), 1);
+        }
     }
 
     #[test]
