@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Mutex,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -14,14 +14,14 @@ use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use tauri::{
     AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, PhysicalPosition,
-    PhysicalSize, WebviewWindow, WindowEvent, Wry,
+    PhysicalSize, WebviewWindow, WindowEvent,
 };
 use tauri_plugin_log::log;
-use tauri_plugin_store::{Store, StoreExt};
 use uuid::Uuid;
 
 use crate::{
     pinned_windows::sync_pinned_window_registry,
+    save_load::write_atomic,
     user_action_workflow::{PinTarget, PinWorkflow},
     windows::{apply_window_pin_state, GeometryIndex, NoteGeometry},
 };
@@ -180,7 +180,7 @@ impl PersistedTimerStore {
 }
 
 pub struct TimerRepository {
-    store: Option<Arc<Store<Wry>>>,
+    path: Option<PathBuf>,
     timers: Mutex<BTreeMap<String, StoredTimer>>,
     unavailable_reason: Option<String>,
 }
@@ -191,7 +191,11 @@ impl TimerRepository {
             .path()
             .app_data_dir()
             .context("Could not locate Sticky application-data directory")?;
-        fs::create_dir_all(&app_data_dir)
+        Self::load_from_dir(&app_data_dir)
+    }
+
+    fn load_from_dir(app_data_dir: &Path) -> anyhow::Result<Self> {
+        fs::create_dir_all(app_data_dir)
             .context("Could not create Sticky application-data directory")?;
         let path = app_data_dir.join(TIMER_STORE_FILE);
 
@@ -199,7 +203,7 @@ impl TimerRepository {
             match read_and_validate_store(&path) {
                 Ok(store) => store,
                 Err(error) => {
-                    let quarantine = quarantine_bad_store(&app_data_dir, &path)?;
+                    let quarantine = quarantine_bad_store(app_data_dir, &path)?;
                     log::error!(
                         "Timer store is unreadable ({error:#}); quarantined it at {:?}",
                         quarantine
@@ -211,13 +215,8 @@ impl TimerRepository {
             PersistedTimerStore::empty()
         };
 
-        let store = app
-            .store_builder(TIMER_STORE_FILE)
-            .disable_auto_save()
-            .build()
-            .context("Could not open timer storage")?;
         let repository = Self {
-            store: Some(store),
+            path: Some(path),
             timers: Mutex::new(persisted.timers),
             unavailable_reason: None,
         };
@@ -227,7 +226,7 @@ impl TimerRepository {
 
     pub fn unavailable(error: anyhow::Error) -> Self {
         Self {
-            store: None,
+            path: None,
             timers: Mutex::new(BTreeMap::new()),
             unavailable_reason: Some(format!("{error:#}")),
         }
@@ -329,13 +328,12 @@ impl TimerRepository {
     }
 
     fn persist(&self, timers: &BTreeMap<String, StoredTimer>) -> anyhow::Result<()> {
-        let store = self
-            .store
-            .as_ref()
-            .context("Timer storage is unavailable")?;
-        store.set("version", TIMER_STORE_VERSION);
-        store.set("timers", serde_json::to_value(timers)?);
-        store.save().context("Could not save timer storage")
+        let path = self.path.as_ref().context("Timer storage is unavailable")?;
+        let bytes = serde_json::to_vec_pretty(&PersistedTimerStore {
+            version: TIMER_STORE_VERSION,
+            timers: timers.clone(),
+        })?;
+        write_atomic(path, &bytes).context("Could not save timer storage")
     }
 
     fn ensure_available(&self) -> anyhow::Result<()> {
@@ -1263,6 +1261,110 @@ mod tests {
             y: 0,
             collapsed: false,
         }
+    }
+
+    fn temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sticky-timers-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_save_preserves_disk_and_memory_and_never_leaks_into_a_later_save() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir();
+        let path = dir.join(TIMER_STORE_FILE);
+        let repository = TimerRepository::load_from_dir(&dir).unwrap();
+        repository.insert(timer(7_000, None)).unwrap();
+        let previous = fs::read(&path).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let rejected = repository.update("timer", |timer| {
+            timer.reset();
+            Ok(())
+        });
+        let failed_load = TimerRepository::load_from_dir(&dir);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(rejected.is_err());
+        assert!(failed_load.is_err());
+        assert_eq!(fs::read(&path).unwrap(), previous);
+        assert_eq!(repository.get("timer").unwrap().accumulated_ms, 7_000);
+        repository
+            .update("timer", |timer| {
+                timer.x = 42;
+                Ok(())
+            })
+            .unwrap();
+        drop(repository);
+        let reloaded = TimerRepository::load_from_dir(&dir).unwrap();
+        assert_eq!(reloaded.get("timer").unwrap().accumulated_ms, 7_000);
+        assert_eq!(reloaded.get("timer").unwrap().x, 42);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn interrupted_temporary_write_is_ignored_at_load_and_next_save() {
+        let dir = temp_dir();
+        let repository = TimerRepository::load_from_dir(&dir).unwrap();
+        repository.insert(timer(7_000, None)).unwrap();
+        let path = dir.join(TIMER_STORE_FILE);
+        let previous = fs::read(&path).unwrap();
+        fs::write(dir.join(".timers.json.tmp-interrupted"), b"{").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), previous);
+        let reloaded = TimerRepository::load_from_dir(&dir).unwrap();
+        assert_eq!(reloaded.get("timer").unwrap().accumulated_ms, 7_000);
+        reloaded
+            .update("timer", |timer| {
+                timer.x = 42;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            read_and_validate_store(&path).unwrap().timers["timer"].x,
+            42
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_and_unsupported_stores_are_quarantined_and_replaced() {
+        for bytes in [b"{".as_slice(), br#"{"version":999,"timers":{}}"#] {
+            let dir = temp_dir();
+            let path = dir.join(TIMER_STORE_FILE);
+            fs::write(&path, bytes).unwrap();
+            let repository = TimerRepository::load_from_dir(&dir).unwrap();
+            assert!(repository.all().unwrap().is_empty());
+            assert!(read_and_validate_store(&path).unwrap().timers.is_empty());
+            let backups: Vec<_> = fs::read_dir(dir.join("backups")).unwrap().collect();
+            assert_eq!(backups.len(), 1);
+            assert_eq!(
+                fs::read(backups[0].as_ref().unwrap().path()).unwrap(),
+                bytes
+            );
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn repository_load_persists_version_one_migration() {
+        let dir = temp_dir();
+        let path = dir.join(TIMER_STORE_FILE);
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "timers": { "timer": timer(7_000, None) }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let repository = TimerRepository::load_from_dir(&dir).unwrap();
+        assert_eq!(repository.get("timer").unwrap().accumulated_ms, 7_000);
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved["version"], TIMER_STORE_VERSION);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
