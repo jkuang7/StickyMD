@@ -291,9 +291,9 @@ pub fn snap_note_window(
 ) -> Result<(), anyhow::Error> {
     log::debug!("Snapping window {:?}", direction);
 
+    let runtime_state = app.state::<crate::groups::GroupRuntime>();
+    let mut runtime = runtime_state.lock()?;
     let (window_position, window_size) = get_position_and_size(window)?;
-    let id = note_id_from_label(window.label())?;
-    let geometries = app.state::<GeometryIndex>();
 
     let primary_monitor = app
         .primary_monitor()
@@ -315,21 +315,39 @@ pub fn snap_note_window(
         ))?
         .context("window to be positioned is hidden or otherwise has no display")?;
 
-    if current_monitor.name() != active_monitor.name() {
-        let position = PhysicalPosition {
-            x: active_monitor.position().x + GAP,
-            y: active_monitor.position().y + GAP,
-        };
-        window.set_position(position)?;
-        geometries.set_position(id, position)?;
-        return Ok(());
-    }
-
-    let other_windows = app
+    let others = app
         .webview_windows()
         .into_iter()
-        .filter(|(_, wind)| wind != window)
-        .filter_map(|(_, wind)| get_position_and_size(&wind).ok());
+        .filter(|(_, other)| other != window)
+        .filter_map(|(_, other)| get_position_and_size(&other).ok())
+        .collect::<Vec<_>>();
+    let target = snap_target(
+        window_position,
+        window_size,
+        direction,
+        partial,
+        *current_monitor.position(),
+        *current_monitor.size(),
+        (current_monitor.name() != active_monitor.name()).then_some(*active_monitor.position()),
+        &others,
+    );
+    crate::groups::move_snapped_note(window, target, &mut runtime)
+}
+
+fn snap_target(
+    window_position: PhysicalPosition<i32>,
+    window_size: PhysicalSize<u32>,
+    direction: Direction,
+    partial: bool,
+    monitor_position: PhysicalPosition<i32>,
+    monitor_size: PhysicalSize<u32>,
+    other_monitor: Option<PhysicalPosition<i32>>,
+    others: &[(PhysicalPosition<i32>, PhysicalSize<u32>)],
+) -> PhysicalPosition<i32> {
+    if let Some(origin) = other_monitor {
+        return PhysicalPosition::new(origin.x + GAP, origin.y + GAP);
+    }
+    let other_windows = others.iter().copied();
 
     let viable_edges: Box<dyn Iterator<Item = i32>> =
         if partial {
@@ -406,12 +424,12 @@ pub fn snap_note_window(
             }
         };
 
-    let position = match direction {
+    match direction {
         Direction::Left => PhysicalPosition {
             x: viable_edges
                 .filter(|edge| *edge < window_position.x)
                 .max()
-                .unwrap_or(current_monitor.position().x + GAP),
+                .unwrap_or(monitor_position.x + GAP),
             y: window_position.y,
         },
         Direction::Up => PhysicalPosition {
@@ -419,15 +437,14 @@ pub fn snap_note_window(
             y: viable_edges
                 .filter(|edge| *edge < window_position.y)
                 .max()
-                .unwrap_or(current_monitor.position().y + GAP),
+                .unwrap_or(monitor_position.y + GAP),
         },
         Direction::Right => PhysicalPosition {
             x: viable_edges
                 .filter(|edge| *edge > window_position.x)
                 .min()
                 .unwrap_or(
-                    ((current_monitor.position().x + current_monitor.size().width as i32)
-                        - window_size.width as i32)
+                    ((monitor_position.x + monitor_size.width as i32) - window_size.width as i32)
                         - GAP,
                 ),
             y: window_position.y,
@@ -438,16 +455,11 @@ pub fn snap_note_window(
                 .filter(|edge| *edge > window_position.y)
                 .min()
                 .unwrap_or(
-                    ((current_monitor.position().y + current_monitor.size().height as i32)
-                        - window_size.height as i32)
+                    ((monitor_position.y + monitor_size.height as i32) - window_size.height as i32)
                         - GAP,
                 ),
         },
-    };
-
-    window.set_position(position)?;
-    geometries.set_position(id, position)?;
-    Ok(())
+    }
 }
 
 pub fn create_sticky(app: &AppHandle) -> Result<WebviewWindow, anyhow::Error> {
@@ -977,4 +989,98 @@ pub fn change_note_font_size(
         font_size,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod snap_tests {
+    use super::*;
+
+    #[test]
+    fn full_and_partial_snap_targets_keep_the_other_axis_and_use_nearest_edges() {
+        let origin = PhysicalPosition::new(400, 300);
+        let size = PhysicalSize::new(100, 80);
+        let others = [
+            (PhysicalPosition::new(200, 300), size),
+            (PhysicalPosition::new(600, 300), size),
+            (PhysicalPosition::new(400, 100), size),
+            (PhysicalPosition::new(400, 500), size),
+            (PhysicalPosition::new(350, 0), PhysicalSize::new(20, 20)),
+        ];
+        for (direction, full, partial) in [
+            (Direction::Left, (320, 300), (390, 300)),
+            (Direction::Right, (480, 300), (480, 300)),
+            (Direction::Up, (400, 200), (400, 200)),
+            (Direction::Down, (400, 400), (400, 400)),
+        ] {
+            for (partial_snap, expected) in [(false, full), (true, partial)] {
+                assert_eq!(
+                    snap_target(
+                        origin,
+                        size,
+                        direction,
+                        partial_snap,
+                        PhysicalPosition::new(0, 0),
+                        PhysicalSize::new(1000, 800),
+                        None,
+                        &others
+                    ),
+                    PhysicalPosition::new(expected.0, expected.1)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn snap_targets_use_monitor_edges_and_preserve_cross_monitor_behavior() {
+        let size = PhysicalSize::new(100, 80);
+        for partial in [false, true] {
+            for (direction, expected) in [
+                (Direction::Left, (20, 300)),
+                (Direction::Right, (880, 300)),
+                (Direction::Up, (400, 20)),
+                (Direction::Down, (400, 700)),
+            ] {
+                assert_eq!(
+                    snap_target(
+                        PhysicalPosition::new(400, 300),
+                        size,
+                        direction,
+                        partial,
+                        PhysicalPosition::new(0, 0),
+                        PhysicalSize::new(1000, 800),
+                        None,
+                        &[]
+                    ),
+                    PhysicalPosition::new(expected.0, expected.1)
+                );
+                assert_eq!(
+                    snap_target(
+                        PhysicalPosition::new(400, 300),
+                        size,
+                        direction,
+                        partial,
+                        PhysicalPosition::new(0, 0),
+                        PhysicalSize::new(1000, 800),
+                        Some(PhysicalPosition::new(-1000, 100)),
+                        &[]
+                    ),
+                    PhysicalPosition::new(-980, 120)
+                );
+            }
+            let at_edge = PhysicalPosition::new(20, 300);
+            assert_eq!(
+                snap_target(
+                    at_edge,
+                    size,
+                    Direction::Left,
+                    partial,
+                    PhysicalPosition::new(0, 0),
+                    PhysicalSize::new(1000, 800),
+                    None,
+                    &[]
+                ),
+                at_edge
+            );
+        }
+    }
 }
