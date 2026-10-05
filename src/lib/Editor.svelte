@@ -23,6 +23,7 @@
     holdEditorTyping,
     editorFinalSaveLock,
   } from "./editorExtensions";
+  import { createEditorSaveQueue } from "./editorSave";
   import { runQuitSave } from "./finalSaveHolds";
   import Icon from "./Icon.svelte";
 
@@ -45,7 +46,7 @@
   let currentMatch = $state(0);
   let totalMatches = $state(0);
   let saveTimeout: number | undefined;
-  let saveChain: Promise<void> = Promise.resolve();
+  const saveDocument = createEditorSaveQueue(invoke);
   const unlisteners: UnlistenFn[] = [];
   const minimumWindowHeight = 80;
   const titlebarHeight = 24;
@@ -133,21 +134,10 @@
     if (!editor) throw new Error("The note editor is not ready");
 
     const snapshot = editor.getJSON();
-    const color = colorOverride ?? document.body.style.backgroundColor;
-    const save = saveChain
-      .catch(() => undefined)
-      .then(async () => {
-        if (
-          quitAttempt !== undefined &&
-          (!editor || !editorFinalSaveLock(editor).isCurrentQuit(quitAttempt))
-        ) return;
-        await invoke("save_note", {
-          document: snapshot,
-          color,
-        });
-      });
-    saveChain = save;
-    await save;
+    await saveDocument(snapshot, colorOverride, () =>
+      quitAttempt === undefined ||
+      (editor !== undefined && editorFinalSaveLock(editor).isCurrentQuit(quitAttempt)),
+    );
   }
 
   export function focus() {

@@ -368,6 +368,25 @@ impl NoteRepository {
         Ok(result)
     }
 
+    pub fn save_document(
+        &self,
+        id: &str,
+        document: Value,
+        color: Option<String>,
+    ) -> anyhow::Result<StoredNote> {
+        anyhow::ensure!(
+            document.get("type").and_then(Value::as_str) == Some("doc"),
+            "Refusing to save a document whose root type is not 'doc'"
+        );
+        self.update(id, |note| {
+            note.document = document;
+            if let Some(color) = color {
+                note.color = color;
+            }
+            Ok(())
+        })
+    }
+
     pub fn update<F>(&self, id: &str, update: F) -> anyhow::Result<StoredNote>
     where
         F: FnOnce(&mut StoredNote) -> anyhow::Result<()>,
@@ -851,6 +870,30 @@ mod tests {
         assert_eq!(notes[0].document, empty_document());
         assert!(dir.join(NOTES_DATA).is_file());
         assert!(!dir.join(PREVIOUS_NOTES_DATA).exists());
+        cleanup(dir);
+    }
+
+    #[test]
+    fn document_save_without_color_keeps_the_stored_color() {
+        let dir = temp_dir("document-save-color");
+        let repository = NoteRepository::load_from_dir(&dir).unwrap();
+        let id = repository.all().unwrap()[0].id.clone();
+        repository
+            .save_document(&id, document("color change"), Some("#81b7dd".into()))
+            .unwrap();
+        let selected = repository.get(&id).unwrap();
+        assert_eq!(selected.color, "#81b7dd");
+        assert_eq!(selected.document, document("color change"));
+
+        repository
+            .save_document(&id, document("blur save"), None)
+            .unwrap();
+        let reloaded = NoteRepository::load_from_dir(&dir)
+            .unwrap()
+            .get(&id)
+            .unwrap();
+        assert_eq!(reloaded.color, "#81b7dd");
+        assert_eq!(reloaded.document, document("blur save"));
         cleanup(dir);
     }
 

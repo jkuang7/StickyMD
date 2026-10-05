@@ -338,23 +338,15 @@ pub fn close_window(window: tauri::WebviewWindow) -> Result<(), String> {
 pub fn save_note(
     window: tauri::WebviewWindow,
     document: Value,
-    color: String,
+    color: Option<String>,
 ) -> Result<(), String> {
-    if document.get("type").and_then(Value::as_str) != Some("doc") {
-        return Err("Refusing to save a document whose root type is not 'doc'".into());
-    }
-
     let group_runtime = window.state::<GroupRuntime>();
     let _operation = group_runtime.lock().map_err(|error| error.to_string())?;
     let id = note_id_from_label(window.label()).map_err(|error| error.to_string())?;
     let repository = window.state::<NoteRepository>();
 
     repository
-        .update(id, |note| {
-            note.document = document;
-            note.color = color;
-            Ok(())
-        })
+        .save_document(id, document, color)
         .map_err(|error| error.to_string())?;
 
     Ok(())
