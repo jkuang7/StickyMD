@@ -1,6 +1,8 @@
 // @ts-nocheck -- Keep this Node-runner regression free of test-only packages.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Editor } from "@tiptap/core";
+import { createEditorExtensions, holdEditorTyping } from "../src/lib/editorExtensions.ts";
 
 import {
   USER_ACTION_REQUEST_EVENT,
@@ -29,6 +31,7 @@ function memoryListener() {
 
 function noteBindings(events, failures = new Map()) {
   return {
+    holdTyping: () => () => undefined,
     async invoke(command, args) {
       events.push({ step: "invoke", command, args });
       if (failures.has(command)) throw new Error(failures.get(command));
@@ -317,4 +320,126 @@ test("production listener renders busy without starting a second command", async
     { status: "busy", message: "Another user action is already running" },
     { status: "succeeded" },
   ]);
+});
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function createEditor() {
+  return new Editor({
+    element: null,
+    extensions: createEditorExtensions(),
+    content: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "accepted" }] }] },
+  });
+}
+
+test("close holds the editor before its snapshot until the close ends", async () => {
+  const editor = createEditor();
+  const save = deferred();
+  const close = deferred();
+  const closing = deferred();
+  let updates = 0;
+  editor.on("update", () => { updates += 1; });
+  const input = createNoteUserActionInput({
+    holdTyping: () => holdEditorTyping(editor),
+    async flushPendingContent() {
+      assert.equal(editor.isEditable, false);
+      assert.equal(editor.getText(), "accepted");
+      await save.promise;
+    },
+    async invoke(command) {
+      assert.equal(command, "close_window");
+      assert.equal(editor.isEditable, false);
+      closing.resolve();
+      await close.promise;
+    },
+    prepareToCollapse() {},
+    displayColor() {},
+  }, async () => true, () => undefined);
+  try {
+    const pending = input.close();
+    await Promise.resolve();
+    assert.equal(editor.isEditable, false);
+    assert.deepEqual(await input.close(), { status: "busy", message: "Another user action is already running" });
+    assert.equal(editor.isEditable, false);
+    save.resolve();
+    await closing.promise;
+    assert.equal(editor.isEditable, false);
+    close.resolve();
+    assert.deepEqual(await pending, { status: "succeeded" });
+    assert.equal(editor.isEditable, true);
+    assert.equal(updates, 0);
+  } finally {
+    editor.destroy();
+  }
+});
+
+for (const failedStep of ["save", "close"]) {
+  test(`${failedStep} failure releases typing before displaying the failure`, async () => {
+    const editor = createEditor();
+    const outcomes: unknown[] = [];
+    let closeCalls = 0;
+    const input = createNoteUserActionInput({
+      holdTyping: () => holdEditorTyping(editor),
+      async flushPendingContent() {
+        assert.equal(editor.isEditable, false);
+        if (failedStep === "save") throw new Error("save failed");
+      },
+      async invoke() {
+        closeCalls += 1;
+        assert.equal(editor.isEditable, false);
+        throw new Error("close failed");
+      },
+      prepareToCollapse() {},
+      displayColor() {},
+    }, async () => true, (outcome) => {
+      assert.equal(editor.isEditable, true);
+      outcomes.push(outcome);
+    });
+    try {
+      const expected = { status: "failed", message: `${failedStep} failed` };
+      assert.deepEqual(await input.close(), expected);
+      assert.deepEqual(outcomes, [expected]);
+      assert.equal(closeCalls, failedStep === "save" ? 0 : 1);
+      assert.equal(editor.isEditable, true);
+    } finally {
+      editor.destroy();
+    }
+  });
+}
+
+test("other action saves leave typing enabled", async () => {
+  const editor = createEditor();
+  let holds = 0;
+  let saves = 0;
+  const input = createNoteUserActionInput({
+    holdTyping() { holds += 1; return holdEditorTyping(editor); },
+    async flushPendingContent() {
+      saves += 1;
+      assert.equal(editor.isEditable, true);
+    },
+    async invoke() { assert.equal(editor.isEditable, true); },
+    prepareToCollapse() {},
+    displayColor() {},
+  }, async () => true, () => undefined);
+  try {
+    const outcomes = [
+      await input.fold(),
+      await input.unfold(),
+      await input.pin(),
+      await input.unpin(),
+      await input.relink(),
+      await input.setColor("#65a65b"),
+      await input.changeFontSize(true),
+      await input.snap("Left", false),
+    ];
+    assert.ok(outcomes.every((outcome) => outcome.status === "succeeded"));
+    assert.equal(holds, 0);
+    assert.equal(saves, 8);
+  } finally {
+    editor.destroy();
+  }
 });

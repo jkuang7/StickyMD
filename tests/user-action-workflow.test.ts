@@ -12,6 +12,7 @@ import {
 test("note close flushes before lifecycle mutation", async () => {
   const events: string[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => events.push("flush"),
     closeSurface: async () => events.push("archive-and-close"),
     setSurfaceCollapsed: async () => undefined,
@@ -25,6 +26,7 @@ test("note close flushes before lifecycle mutation", async () => {
 test("failed note flush prevents lifecycle mutation", async () => {
   const events: string[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => {
       events.push("flush");
       throw new Error("save unavailable");
@@ -44,6 +46,7 @@ test("failed note flush prevents lifecycle mutation", async () => {
 test("note fold and unfold flush before durable and native mutation", async () => {
   const events: string[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => events.push("flush"),
     closeSurface: async () => events.push("archive-and-close"),
     setSurfaceCollapsed: async (collapsed) =>
@@ -59,6 +62,7 @@ test("note fold and unfold flush before durable and native mutation", async () =
 test("failed note flush prevents fold and unfold mutation", async () => {
   const mutations: boolean[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => {
       throw new Error("save unavailable");
     },
@@ -79,6 +83,7 @@ test("failed note flush prevents fold and unfold mutation", async () => {
 test("lifecycle and compensation failures stay one workflow failure", async () => {
   let attempts = 0;
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => undefined,
     closeSurface: async () => {
       attempts += 1;
@@ -127,6 +132,7 @@ test("the resolved target stays fixed while an asynchronous close is running", a
   const events: string[] = [];
   let releaseFlush!: () => void;
   let focused = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: () =>
       new Promise<void>((resolve) => {
         events.push("first flush");
@@ -249,6 +255,7 @@ test("fold shares the workflow busy policy with every other action", async () =>
 test("note pin and unpin flush before the pin transaction", async () => {
   const events: string[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => events.push("flush"),
     closeSurface: async () => undefined,
     setSurfaceCollapsed: async () => undefined,
@@ -265,6 +272,7 @@ test("note pin and unpin flush before the pin transaction", async () => {
 test("failed note flush prevents every pin representation from changing", async () => {
   const mutations: boolean[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => {
       throw new Error("save unavailable");
     },
@@ -358,6 +366,7 @@ test("pin shares stable targeting and the workflow busy policy", async () => {
 test("relink resolves once, confirms, then flushes a note before mutation", async () => {
   const events: string[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => events.push("flush"),
     closeSurface: async () => undefined,
     setSurfaceCollapsed: async () => undefined,
@@ -382,6 +391,7 @@ test("relink resolves once, confirms, then flushes a note before mutation", asyn
 test("cancelled relink is a successful no-op before note persistence", async () => {
   const events: string[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => events.push("flush"),
     closeSurface: async () => undefined,
     setSurfaceCollapsed: async () => undefined,
@@ -403,6 +413,7 @@ test("cancelled relink is a successful no-op before note persistence", async () 
 test("failed note flush prevents an accepted relink mutation", async () => {
   const events: string[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => {
       events.push("flush");
       throw new Error("save unavailable");
@@ -529,6 +540,7 @@ test("the shared input adapter routes relink success, cancellation, and failure"
 test("note color saves the selected color and current document before displaying it", async () => {
   const events: string[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async (color) =>
       events.push(`save current document with ${color}`),
     closeSurface: async () => undefined,
@@ -554,6 +566,7 @@ test("note color saves the selected color and current document before displaying
 test("failed color persistence leaves the displayed color unchanged", async () => {
   const displayed: string[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => {
       throw new Error("save unavailable");
     },
@@ -577,6 +590,7 @@ test("failed color persistence leaves the displayed color unchanged", async () =
 test("note font-size and snap actions flush before durable or native mutation", async () => {
   const events: string[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => events.push("flush"),
     closeSurface: async () => undefined,
     setSurfaceCollapsed: async () => undefined,
@@ -615,6 +629,7 @@ test("note font-size and snap actions flush before durable or native mutation", 
 test("a failed note save prevents font-size and snap mutation", async () => {
   const mutations: string[] = [];
   const target = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => {
       throw new Error("save unavailable");
     },
@@ -681,6 +696,7 @@ test("note-only actions retain the resolved target while saving", async () => {
   const events: string[] = [];
   let releaseSave!: () => void;
   const first = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: () =>
       new Promise<void>((resolve) => {
         events.push("first save");
@@ -695,6 +711,7 @@ test("note-only actions retain the resolved target while saving", async () => {
     snapSurface: async () => undefined,
   });
   const second = createNoteActionAdapter({
+    holdTyping: () => () => undefined,
     flushPendingContent: async () => events.push("second save"),
     closeSurface: async () => undefined,
     setSurfaceCollapsed: async () => undefined,

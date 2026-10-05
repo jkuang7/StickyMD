@@ -18,7 +18,7 @@
     type SearchResult,
   } from "prosemirror-search";
 
-  import { createEditorExtensions } from "./editorExtensions";
+  import { createEditorExtensions, holdEditorTyping } from "./editorExtensions";
   import Icon from "./Icon.svelte";
 
   interface StickyInit {
@@ -113,6 +113,11 @@
   function queueSave(delay = 2_000) {
     if (saveTimeout !== undefined) window.clearTimeout(saveTimeout);
     saveTimeout = window.setTimeout(() => void flushSave(), delay);
+  }
+
+  export function holdTyping() {
+    if (!editor) throw new Error("The note editor is not ready");
+    return holdEditorTyping(editor);
   }
 
   export async function flushSave(colorOverride?: string) {

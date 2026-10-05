@@ -96,6 +96,10 @@
   const userActionInput = createNoteUserActionInput(
     {
       invoke,
+      holdTyping() {
+        if (!editor) throw new Error("The note editor is not ready");
+        return editor.holdTyping();
+      },
       async flushPendingContent(color) {
         if (!editor) throw new Error("The note editor is not ready");
         await editor.flushSave(color);
