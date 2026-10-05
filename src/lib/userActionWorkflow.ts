@@ -152,8 +152,13 @@ export function createNoteActionAdapter(
 ): SurfaceActionAdapter {
   return {
     async close() {
-      await dependencies.flushPendingContent();
-      await dependencies.closeSurface();
+      const releaseTyping = dependencies.holdTyping();
+      try {
+        await dependencies.flushPendingContent();
+        await dependencies.closeSurface();
+      } finally {
+        releaseTyping();
+      }
     },
     async setCollapsed(collapsed) {
       await dependencies.flushPendingContent();
@@ -242,6 +247,7 @@ export function createUserActionInputAdapter(
 export const USER_ACTION_REQUEST_EVENT = "user_action_requested";
 
 interface NoteActionDependencies {
+  holdTyping(): () => void;
   flushPendingContent(color?: string): Promise<unknown>;
   closeSurface(): Promise<unknown>;
   setSurfaceCollapsed(collapsed: boolean): Promise<unknown>;
@@ -269,6 +275,7 @@ type Invoke = (
 
 export interface NoteUserActionBindings {
   invoke: Invoke;
+  holdTyping(): () => void;
   flushPendingContent(color?: string): Promise<unknown>;
   prepareToCollapse(): void;
   displayColor(color: string): void;
@@ -285,6 +292,7 @@ export function createNoteUserActionInput(
   render: RenderOutcome,
 ) {
   const target = createNoteActionAdapter({
+    holdTyping: bindings.holdTyping,
     flushPendingContent: bindings.flushPendingContent,
     closeSurface: () => bindings.invoke("close_window"),
     async setSurfaceCollapsed(collapsed) {

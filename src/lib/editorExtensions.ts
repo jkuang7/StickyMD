@@ -20,6 +20,12 @@ import { canJoin } from "@tiptap/pm/transform";
 import { StarterKit } from "@tiptap/starter-kit";
 import { search } from "prosemirror-search";
 
+export function holdEditorTyping(editor: Editor): () => void {
+  const editable = editor.isEditable;
+  editor.setEditable(false, false);
+  return () => editor.setEditable(editable, false);
+}
+
 const structuralMarkdownLine =
   /^(?: {0,3}#{1,6}[ \t]+| {0,3}>[ \t]?| {0,3}(?:[-+*]|\d+[.)])[ \t]+| {0,3}(?:`{3,}|~{3,}).*$| {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$)/m;
 const markdownLink = /!?\[[^\]\n]+\]\(\s*\S+(?:\s+["'][^"'\n]*["'])?\s*\)/;
