@@ -19,8 +19,9 @@ use crate::{
         set_ungrouped_timer_collapsed, StoredTimer, TimerRepository, TIMER_HEIGHT, TIMER_WIDTH,
     },
     windows::{
-        close_ungrouped_window_and_archive, open_missing_active_notes, open_sticky,
-        set_ungrouped_window_collapsed, sorted_windows, GeometryIndex, NoteGeometry,
+        close_ungrouped_window_and_archive, include_rollback, open_missing_active_notes,
+        open_sticky, restore_every, set_ungrouped_window_collapsed, sorted_windows, GeometryIndex,
+        NoteGeometry,
     },
 };
 
@@ -456,10 +457,10 @@ fn persist_surface_changes(
         originals.push(stored_surface(app, &replacement.member())?);
     }
     if let Err(error) = replace_surface_batch(app, replacements) {
-        if let Err(rollback) = replace_surface_batch(app, &originals) {
-            log::error!("Could not roll back durable linked-window geometry: {rollback:#}");
-        }
-        return Err(error);
+        return Err(include_rollback(
+            error,
+            replace_surface_batch(app, &originals),
+        ));
     }
     Ok(originals)
 }
@@ -608,49 +609,53 @@ fn layout_for_members_at_origin(
     Ok(GroupLayout { snapshots, targets })
 }
 
+fn restore_snapshot_geometry(
+    geometry: NoteGeometry,
+    resize: impl FnOnce(PhysicalSize<u32>) -> anyhow::Result<()>,
+    reposition: impl FnOnce(PhysicalPosition<i32>) -> anyhow::Result<()>,
+    cache: impl FnOnce(NoteGeometry) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    restore_every(
+        [
+            resize(geometry.size),
+            reposition(geometry.position),
+            cache(geometry),
+        ],
+        |result| result,
+    )
+}
+
 fn restore_snapshots(
     snapshots: &[WindowSnapshot],
     geometries: &GeometryIndex,
     runtime: &mut GroupRuntimeState,
 ) -> anyhow::Result<()> {
-    let mut failures = Vec::new();
-    for snapshot in snapshots {
-        if let Err(error) = snapshot.window.set_size(snapshot.size) {
-            failures.push(format!(
-                "Could not restore window {:?} size: {error}",
-                snapshot.member
-            ));
-        }
-        let position_restored = if let Err(error) = snapshot.window.set_position(snapshot.position)
-        {
-            failures.push(format!(
-                "Could not restore window {:?} position: {error}",
-                snapshot.member
-            ));
-            false
-        } else {
-            true
-        };
-        if let Err(error) = geometries.insert(
-            snapshot.member.id.clone(),
+    let result = restore_every(snapshots, |snapshot| {
+        restore_snapshot_geometry(
             NoteGeometry {
                 position: snapshot.position,
                 size: snapshot.size,
             },
-        ) {
-            failures.push(format!("Could not restore live geometry: {error}"));
-        }
-        if position_restored {
-            runtime.record_programmatic_position(snapshot.member.runtime_key(), snapshot.position);
-        }
+            |size| {
+                snapshot
+                    .window
+                    .set_size(size)
+                    .with_context(|| format!("Could not restore window {:?} size", snapshot.member))
+            },
+            |position| {
+                snapshot.window.set_position(position).with_context(|| {
+                    format!("Could not restore window {:?} position", snapshot.member)
+                })?;
+                runtime.record_programmatic_position(snapshot.member.runtime_key(), position);
+                Ok(())
+            },
+            |geometry| geometries.insert(snapshot.member.id.clone(), geometry),
+        )
+    });
+    if let Err(error) = &result {
+        log::error!("{error:#}");
     }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        let message = failures.join("; ");
-        log::error!("{message}");
-        bail!("{message}")
-    }
+    result
 }
 
 fn apply_layout(
@@ -659,25 +664,29 @@ fn apply_layout(
     runtime: &mut GroupRuntimeState,
 ) -> anyhow::Result<()> {
     for (index, (snapshot, target)) in layout.snapshots.iter().zip(&layout.targets).enumerate() {
-        let current = snapshot
-            .position
-            .to_logical::<i32>(snapshot.window.scale_factor()?);
-        let requested = requested_physical_position(snapshot, *target)?;
-        if current != *target {
-            if let Err(error) = snapshot.window.set_position(*target) {
-                let _ = restore_snapshots(&layout.snapshots[..index], geometries, runtime);
-                return Err(error).with_context(|| {
+        let apply = (|| -> anyhow::Result<()> {
+            let current = snapshot
+                .position
+                .to_logical::<i32>(snapshot.window.scale_factor()?);
+            let requested = requested_physical_position(snapshot, *target)?;
+            if current != *target {
+                snapshot.window.set_position(*target).with_context(|| {
                     format!("Could not position group member {:?}", snapshot.member)
-                });
+                })?;
             }
-        }
-        if let Err(error) = geometries.set_position(&snapshot.member.id, requested) {
-            let _ = restore_snapshots(&layout.snapshots[..=index], geometries, runtime);
-            return Err(error)
-                .with_context(|| format!("Could not cache group member {:?}", snapshot.member));
-        }
-        if current != *target {
-            runtime.record_programmatic_position(snapshot.member.runtime_key(), requested);
+            geometries
+                .set_position(&snapshot.member.id, requested)
+                .with_context(|| format!("Could not cache group member {:?}", snapshot.member))?;
+            if current != *target {
+                runtime.record_programmatic_position(snapshot.member.runtime_key(), requested);
+            }
+            Ok(())
+        })();
+        if let Err(error) = apply {
+            return Err(include_rollback(
+                error,
+                restore_snapshots(&layout.snapshots[..=index], geometries, runtime),
+            ));
         }
     }
     Ok(())
@@ -1421,6 +1430,13 @@ fn close_group_member(
     Ok(())
 }
 
+fn finish_layout_change<T>(
+    action: impl FnOnce() -> anyhow::Result<T>,
+    rollback: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<T> {
+    action().map_err(|error| include_rollback(error, rollback()))
+}
+
 fn close_grouped_timer(
     window: &WebviewWindow,
     runtime: &mut GroupRuntimeState,
@@ -1451,52 +1467,54 @@ fn close_grouped_timer(
     if let Some(layout) = &layout {
         apply_layout(layout, &app.state::<GeometryIndex>(), runtime)?;
     }
-    let replacements = layout
-        .as_ref()
-        .map(|layout| layout_surface_replacements(app, layout))
-        .transpose()?
-        .unwrap_or_default();
-    let originals = persist_surface_changes(app, &replacements)?;
-    if let Err(error) =
-        repository.mutate(|store| persist_group_detachment(store, &group.id, &member))
-    {
-        restore_surface_changes(app, &originals);
-        if let Some(layout) = &layout {
-            let _ = restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
-        }
-        return Err(error.context("Could not remove timer from linked group"));
-    }
-    let removed_timer = match remove_timer_for_close(window) {
-        Ok(timer) => timer,
-        Err(error) => {
-            let _ = repository.mutate(|store| {
-                store
-                    .groups
-                    .insert(previous_group.id.clone(), previous_group.clone());
+    finish_layout_change(
+        || {
+            let replacements = layout
+                .as_ref()
+                .map(|layout| layout_surface_replacements(app, layout))
+                .transpose()?
+                .unwrap_or_default();
+            let originals = persist_surface_changes(app, &replacements)?;
+            let mut detached = false;
+            let mut removed_timer = None;
+            let result = (|| {
+                repository
+                    .mutate(|store| persist_group_detachment(store, &group.id, &member))
+                    .context("Could not remove timer from linked group")?;
+                detached = true;
+                removed_timer =
+                    Some(remove_timer_for_close(window).context("Could not delete linked timer")?);
+                window.close().context("Could not close linked timer")?;
                 Ok(())
-            });
-            restore_surface_changes(app, &originals);
-            if let Some(layout) = &layout {
-                let _ =
-                    restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
+            })();
+            if let Err(error) = result {
+                let timer = removed_timer.map_or(Ok(()), |timer| {
+                    restore_timer_after_failed_close(window, timer)
+                });
+                let group = if detached {
+                    repository.mutate(|store| {
+                        store
+                            .groups
+                            .insert(previous_group.id.clone(), previous_group.clone());
+                        Ok(())
+                    })
+                } else {
+                    Ok(())
+                };
+                let surfaces = replace_surface_batch(app, &originals);
+                return Err(include_rollback(
+                    error,
+                    restore_every([timer, group, surfaces], |result| result),
+                ));
             }
-            return Err(error.context("Could not delete linked timer"));
-        }
-    };
-    if let Err(close_error) = window.close() {
-        restore_timer_after_failed_close(window, removed_timer)?;
-        repository.mutate(|store| {
-            store
-                .groups
-                .insert(previous_group.id.clone(), previous_group.clone());
             Ok(())
-        })?;
-        restore_surface_changes(app, &originals);
-        if let Some(layout) = &layout {
-            let _ = restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
-        }
-        return Err(close_error.into());
-    }
+        },
+        || {
+            layout.as_ref().map_or(Ok(()), |layout| {
+                restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime)
+            })
+        },
+    )?;
     let key = member.runtime_key();
     runtime.drag_origins.remove(&key);
     runtime.completed_drag_origins.remove(&key);
@@ -1566,29 +1584,37 @@ fn restore_archived_note(
         if let Some(layout) = &layout {
             apply_layout(layout, &app.state::<GeometryIndex>(), runtime)?;
         }
-        let replacements = layout
-            .as_ref()
-            .map(|layout| layout_surface_replacements(app, layout))
-            .transpose()?
-            .unwrap_or_default();
-        let originals = persist_surface_changes(app, &replacements)?;
-        let persist = repository.update(&note.id, |stored| {
-            stored.closed_at = None;
-            Ok(())
-        });
-        if let Err(error) = persist {
-            restore_surface_changes(app, &originals);
-            if let Some(layout) = &layout {
-                let _ =
-                    restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
-            }
-            return Err(error.context("Could not persist restored group member"));
-        }
+        finish_layout_change(
+            || {
+                let replacements = layout
+                    .as_ref()
+                    .map(|layout| layout_surface_replacements(app, layout))
+                    .transpose()?
+                    .unwrap_or_default();
+                let originals = persist_surface_changes(app, &replacements)?;
+                repository
+                    .update(&note.id, |stored| {
+                        stored.closed_at = None;
+                        Ok(())
+                    })
+                    .map_err(|error| {
+                        include_rollback(
+                            error.context("Could not persist restored group member"),
+                            replace_surface_batch(app, &originals),
+                        )
+                    })?;
+                Ok(())
+            },
+            || {
+                layout.as_ref().map_or(Ok(()), |layout| {
+                    restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime)
+                })
+            },
+        )?;
         Ok(())
     })();
     if let Err(error) = restore {
-        let _ = window.close();
-        return Err(error);
+        return Err(include_rollback(error, window.close().map_err(Into::into)));
     }
     Ok(window)
 }
@@ -1929,6 +1955,95 @@ mod tests {
             position: PhysicalPosition::new(x, y),
             size: PhysicalSize::new(width, height),
         }
+    }
+
+    #[test]
+    fn snapshot_native_failure_still_restores_position_live_geometry_and_later_windows() {
+        let snapshots = [geometry(10, 20, 300, 250), geometry(10, 282, 300, 24)];
+        let mut positions = Vec::new();
+        let mut live = Vec::new();
+        let error = restore_every(snapshots, |snapshot| {
+            restore_snapshot_geometry(
+                snapshot,
+                |_| bail!("resize {}", snapshot.position.y),
+                |position| {
+                    positions.push(position);
+                    Ok(())
+                },
+                |geometry| {
+                    live.push(geometry);
+                    Ok(())
+                },
+            )
+        })
+        .unwrap_err();
+        assert_eq!(positions, snapshots.map(|snapshot| snapshot.position));
+        assert_eq!(live, snapshots);
+        assert_eq!(error.to_string(), "resize 20; resize 282");
+    }
+
+    #[test]
+    fn failed_post_layout_steps_restore_every_window_and_live_geometry() {
+        use std::cell::RefCell;
+        let snapshots = [
+            geometry(10, 20, 300, 250),
+            geometry(10, 282, 300, 24),
+            geometry(10, 318, 300, 250),
+        ];
+        let windows = RefCell::new(snapshots);
+        let live = RefCell::new(snapshots);
+        let error = finish_layout_change(
+            || -> anyhow::Result<()> {
+                windows.borrow_mut()[2].position.y = 282;
+                live.borrow_mut()[2].position.y = 282;
+                bail!("surface save");
+            },
+            || {
+                restore_every(snapshots.iter().enumerate(), |(index, snapshot)| {
+                    restore_snapshot_geometry(
+                        *snapshot,
+                        |size| {
+                            windows.borrow_mut()[index].size = size;
+                            Ok(())
+                        },
+                        |position| {
+                            windows.borrow_mut()[index].position = position;
+                            Ok(())
+                        },
+                        |geometry| {
+                            live.borrow_mut()[index] = geometry;
+                            Ok(())
+                        },
+                    )
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(*windows.borrow(), snapshots);
+        assert_eq!(*live.borrow(), snapshots);
+        assert_eq!(error.to_string(), "surface save");
+        let error = finish_layout_change(
+            || -> anyhow::Result<()> { bail!("save") },
+            || restore_every(["A", "B"], |id| bail!("restore {id}")),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "save; rollback failed: restore A; restore B"
+        );
+        let mut restored = false;
+        assert_eq!(
+            finish_layout_change(
+                || Ok(42),
+                || {
+                    restored = true;
+                    Ok(())
+                }
+            )
+            .unwrap(),
+            42
+        );
+        assert!(!restored);
     }
 
     #[test]

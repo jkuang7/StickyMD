@@ -747,6 +747,63 @@ pub fn restore_all_notes(app: &AppHandle) -> Result<(), anyhow::Error> {
     crate::groups::restore_all_notes(app)
 }
 
+pub(crate) fn restore_every<T>(
+    snapshots: impl IntoIterator<Item = T>,
+    mut restore: impl FnMut(T) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let failures: Vec<_> = snapshots
+        .into_iter()
+        .filter_map(|snapshot| restore(snapshot).err().map(|error| format!("{error:#}")))
+        .collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", failures.join("; "))
+    }
+}
+
+pub(crate) fn include_rollback(
+    error: anyhow::Error,
+    rollback: anyhow::Result<()>,
+) -> anyhow::Error {
+    match rollback {
+        Ok(()) => error,
+        Err(rollback) => anyhow::anyhow!("{error:#}; rollback failed: {rollback:#}"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FoldEffect {
+    Unmaximize,
+    Resizable(bool),
+    Size(PhysicalSize<u32>),
+    Position(PhysicalPosition<i32>),
+    CacheNativeGeometry,
+    RestoreLiveGeometry(NoteGeometry),
+}
+
+fn change_note_fold(
+    original: &StoredNote,
+    candidate: &StoredNote,
+    effects: &[FoldEffect],
+    rollback: &[FoldEffect],
+    mut save: impl FnMut(&StoredNote) -> anyhow::Result<()>,
+    mut apply: impl FnMut(FoldEffect) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    save(candidate)?;
+    for effect in effects {
+        if let Err(error) = apply(*effect) {
+            let native = restore_every(rollback.iter().copied(), &mut apply);
+            let durable = save(original);
+            return Err(include_rollback(
+                error,
+                restore_every([native, durable], |result| result),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn set_ungrouped_window_collapsed(
     window: &WebviewWindow,
     collapsed: bool,
@@ -764,55 +821,94 @@ pub(crate) fn set_ungrouped_window_collapsed(
     let position = geometry.position.to_logical::<i32>(scale_factor);
     let size = geometry.size.to_logical::<u32>(scale_factor);
 
+    let native = NoteGeometry {
+        position: window.outer_position()?,
+        size: window.outer_size()?,
+    };
+    let resizable = window.is_resizable()?;
+    let mut candidate = current.clone();
+    let mut effects = Vec::new();
     if collapsed {
-        repository.update(id, |note| {
-            note.x = position.x;
-            note.y = position.y;
-            note.expanded_width = size.width.max(150);
-            note.expanded_height = size.height.max(80);
-            note.collapsed = true;
-            Ok(())
-        })?;
+        candidate.x = position.x;
+        candidate.y = position.y;
+        candidate.expanded_width = size.width.max(150);
+        candidate.expanded_height = size.height.max(80);
         if window.is_maximized()? {
-            window.unmaximize()?;
+            effects.push(FoldEffect::Unmaximize);
         }
-        window.set_resizable(false)?;
-        window.set_size(LogicalSize::new(size.width.max(150), COLLAPSED_HEIGHT))?;
-        geometries.set_size(id, window.outer_size()?)?;
+        effects.push(FoldEffect::Resizable(false));
+        effects.push(FoldEffect::Size(
+            LogicalSize::new(size.width.max(150), COLLAPSED_HEIGHT).to_physical(scale_factor),
+        ));
+    } else {
+        let monitor = window
+            .current_monitor()?
+            .or(window.primary_monitor()?)
+            .context("No active monitor available for expanding note")?;
+        let monitor_scale = monitor.scale_factor();
+        let monitor_position = monitor.position().to_logical::<i32>(monitor_scale);
+        let monitor_size = monitor.size().to_logical::<u32>(monitor_scale);
+        let width = current
+            .expanded_width
+            .clamp(150, monitor_size.width.max(150));
+        let height = current
+            .expanded_height
+            .clamp(80, monitor_size.height.max(80));
+        let max_x = monitor_position.x + monitor_size.width.saturating_sub(width) as i32;
+        let max_y = monitor_position.y + monitor_size.height.saturating_sub(height) as i32;
+        candidate.x = position.x.clamp(monitor_position.x, max_x);
+        candidate.y = position.y.clamp(monitor_position.y, max_y);
+        effects.push(FoldEffect::Resizable(true));
+        effects.push(FoldEffect::Size(
+            LogicalSize::new(width, height).to_physical(scale_factor),
+        ));
+        effects.push(FoldEffect::Position(
+            LogicalPosition::new(candidate.x, candidate.y).to_physical(scale_factor),
+        ));
+    }
+    candidate.collapsed = collapsed;
+    effects.push(FoldEffect::CacheNativeGeometry);
+    let rollback = [
+        FoldEffect::Size(native.size),
+        FoldEffect::Position(native.position),
+        FoldEffect::Resizable(resizable),
+        FoldEffect::RestoreLiveGeometry(geometry),
+    ];
+    change_note_fold(
+        &current,
+        &candidate,
+        &effects,
+        &rollback,
+        |note| {
+            repository
+                .update(id, |stored| {
+                    *stored = note.clone();
+                    Ok(())
+                })
+                .map(|_| ())
+        },
+        |effect| {
+            match effect {
+                FoldEffect::Unmaximize => window.unmaximize()?,
+                FoldEffect::Resizable(value) => window.set_resizable(value)?,
+                FoldEffect::Size(value) => window.set_size(value)?,
+                FoldEffect::Position(value) => window.set_position(value)?,
+                FoldEffect::CacheNativeGeometry => geometries.insert(
+                    id.into(),
+                    NoteGeometry {
+                        position: window.outer_position()?,
+                        size: window.outer_size()?,
+                    },
+                )?,
+                FoldEffect::RestoreLiveGeometry(value) => geometries.insert(id.into(), value)?,
+            }
+            Ok(())
+        },
+    )?;
+    if collapsed {
         return Ok(());
     }
 
-    let monitor = window
-        .current_monitor()?
-        .or(window.primary_monitor()?)
-        .context("No active monitor available for expanding note")?;
-    let monitor_scale = monitor.scale_factor();
-    let monitor_position = monitor.position().to_logical::<i32>(monitor_scale);
-    let monitor_size = monitor.size().to_logical::<u32>(monitor_scale);
-    let width = current
-        .expanded_width
-        .clamp(150, monitor_size.width.max(150));
-    let height = current
-        .expanded_height
-        .clamp(80, monitor_size.height.max(80));
-    let max_x = monitor_position.x + monitor_size.width.saturating_sub(width) as i32;
-    let max_y = monitor_position.y + monitor_size.height.saturating_sub(height) as i32;
-    let x = position.x.clamp(monitor_position.x, max_x);
-    let y = position.y.clamp(monitor_position.y, max_y);
-
-    window.set_resizable(true)?;
-    window.set_size(LogicalSize::new(width, height))?;
-    geometries.set_size(id, window.outer_size()?)?;
-    window.set_position(LogicalPosition::new(x, y))?;
-    let physical_position = window.outer_position()?;
-    geometries.set_position(id, physical_position)?;
-    let logical_position = physical_position.to_logical::<i32>(window.scale_factor()?);
-    repository.update(id, |note| {
-        note.x = logical_position.x;
-        note.y = logical_position.y;
-        note.collapsed = false;
-        Ok(())
-    })?;
     window.set_focus()?;
     Ok(())
 }
@@ -994,6 +1090,182 @@ pub fn change_note_font_size(
 #[cfg(test)]
 mod snap_tests {
     use super::*;
+
+    #[test]
+    fn rollback_attempts_every_snapshot_and_reports_every_failure() {
+        let mut attempted = Vec::new();
+        let error = restore_every(0..4, |snapshot| {
+            attempted.push(snapshot);
+            if snapshot == 0 || snapshot == 2 {
+                bail!("snapshot {snapshot}");
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(attempted, [0, 1, 2, 3]);
+        assert_eq!(error.to_string(), "snapshot 0; snapshot 2");
+        assert!(restore_every([1, 2], |_| Ok(())).is_ok());
+    }
+
+    #[test]
+    fn fold_and_unfold_restore_native_live_and_saved_state_after_each_failed_step() {
+        for collapsed in [true, false] {
+            let mut original = StoredNote::new();
+            original.collapsed = !collapsed;
+            let mut candidate = original.clone();
+            candidate.collapsed = collapsed;
+            candidate.x += 20;
+            let prior = NoteGeometry {
+                position: PhysicalPosition::new(50, 70),
+                size: PhysicalSize::new(300, if collapsed { 250 } else { 24 }),
+            };
+            let live_prior = NoteGeometry {
+                position: PhysicalPosition::new(51, 71),
+                ..prior
+            };
+            let target = NoteGeometry {
+                position: PhysicalPosition::new(100, 100),
+                size: PhysicalSize::new(300, if collapsed { 24 } else { 250 }),
+            };
+            let mut effects = vec![
+                FoldEffect::Resizable(!collapsed),
+                FoldEffect::Size(target.size),
+            ];
+            if collapsed {
+                effects.insert(0, FoldEffect::Unmaximize);
+            } else {
+                effects.push(FoldEffect::Position(target.position));
+            }
+            effects.push(FoldEffect::CacheNativeGeometry);
+            let rollback = [
+                FoldEffect::Size(prior.size),
+                FoldEffect::Position(prior.position),
+                FoldEffect::Resizable(collapsed),
+                FoldEffect::RestoreLiveGeometry(live_prior),
+            ];
+            for failed_step in 0..effects.len() {
+                let dir =
+                    std::env::temp_dir().join(format!("stickymd-fold-{}", uuid::Uuid::new_v4()));
+                let repository = NoteRepository::load_from_dir(&dir).unwrap();
+                let id = repository.active().unwrap().remove(0).id;
+                repository
+                    .update(&id, |note| {
+                        *note = original.clone();
+                        note.id = id.clone();
+                        Ok(())
+                    })
+                    .unwrap();
+                let before = repository.get(&id).unwrap();
+                let mut native = prior;
+                let mut live = live_prior;
+                let mut resizable = collapsed;
+                let mut maximized = collapsed;
+                let mut step = 0;
+                let result = change_note_fold(
+                    &before,
+                    &candidate,
+                    &effects,
+                    &rollback,
+                    |value| {
+                        repository
+                            .update(&id, |note| {
+                                *note = value.clone();
+                                note.id = id.clone();
+                                Ok(())
+                            })
+                            .map(|_| ())
+                    },
+                    |effect| {
+                        match effect {
+                            FoldEffect::Unmaximize => {
+                                maximized = false;
+                                native.position = PhysicalPosition::new(0, 0);
+                            }
+                            FoldEffect::Resizable(value) => resizable = value,
+                            FoldEffect::Size(value) => native.size = value,
+                            FoldEffect::Position(value) => native.position = value,
+                            FoldEffect::CacheNativeGeometry => live = native,
+                            FoldEffect::RestoreLiveGeometry(value) => live = value,
+                        }
+                        let fail = step == failed_step;
+                        step += 1;
+                        if fail {
+                            bail!("injected native failure");
+                        }
+                        Ok(())
+                    },
+                );
+                assert!(result.is_err());
+                assert_eq!(native, prior);
+                assert_eq!(live, live_prior);
+                assert_eq!(resizable, collapsed);
+                if collapsed {
+                    assert!(!maximized);
+                }
+                let reopened = NoteRepository::load_from_dir(&dir)
+                    .unwrap()
+                    .get(&id)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(reopened).unwrap(),
+                    serde_json::to_value(&before).unwrap()
+                );
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn fold_save_failure_has_no_native_effects_and_rollback_failures_are_combined() {
+        let original = StoredNote::new();
+        let mut candidate = original.clone();
+        candidate.collapsed = true;
+        let mut native_calls = Vec::new();
+        let error = change_note_fold(
+            &original,
+            &candidate,
+            &[FoldEffect::Resizable(false)],
+            &[],
+            |_| bail!("save failed"),
+            |effect| {
+                native_calls.push(effect);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "save failed");
+        assert!(native_calls.is_empty());
+        let mut saves = 0;
+        let rollback = [
+            FoldEffect::Resizable(true),
+            FoldEffect::Position(PhysicalPosition::new(1, 2)),
+        ];
+        let error = change_note_fold(
+            &original,
+            &candidate,
+            &[FoldEffect::Resizable(false)],
+            &rollback,
+            |_| {
+                saves += 1;
+                if saves == 2 {
+                    bail!("saved state rollback");
+                }
+                Ok(())
+            },
+            |effect| {
+                native_calls.push(effect);
+                bail!("native {effect:?}");
+            },
+        )
+        .unwrap_err();
+        assert_eq!(native_calls.len(), 3);
+        assert_eq!(saves, 2);
+        let error = error.to_string();
+        assert!(error.contains("Resizable(false)"));
+        assert!(error.contains("Resizable(true)"));
+        assert!(error.contains("Position"));
+        assert!(error.contains("saved state rollback"));
+    }
 
     #[test]
     fn full_and_partial_snap_targets_keep_the_other_axis_and_use_nearest_edges() {
