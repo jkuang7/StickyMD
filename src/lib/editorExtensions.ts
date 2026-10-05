@@ -20,10 +20,21 @@ import { canJoin } from "@tiptap/pm/transform";
 import { StarterKit } from "@tiptap/starter-kit";
 import { search } from "prosemirror-search";
 
+import { createFinalSaveLock } from "./finalSaveHolds.ts";
+
+const finalSaveLocks = new WeakMap<Editor, ReturnType<typeof createFinalSaveLock>>();
+
+export function editorFinalSaveLock(editor: Editor) {
+  let lock = finalSaveLocks.get(editor);
+  if (!lock) {
+    lock = createFinalSaveLock(editable => editor.setEditable(editable, false), editor.isEditable);
+    finalSaveLocks.set(editor, lock);
+  }
+  return lock;
+}
+
 export function holdEditorTyping(editor: Editor): () => void {
-  const editable = editor.isEditable;
-  editor.setEditable(false, false);
-  return () => editor.setEditable(editable, false);
+  return editorFinalSaveLock(editor).holdClose();
 }
 
 const structuralMarkdownLine =
