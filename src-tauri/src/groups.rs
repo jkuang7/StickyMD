@@ -900,15 +900,26 @@ where
     if origin == target {
         return Ok(());
     }
+    let key = StoredGroupMember::note(id).runtime_key();
+    let previous_programmatic = runtime.programmatic_positions.get(&key).copied();
+    let previous_drag = runtime.completed_drag_origins.get(&key).copied();
     let result = (|| {
         move_window(target)?;
         geometries.set_position(id, target)?;
         persist()?;
-        runtime.record_programmatic_position(StoredGroupMember::note(id).runtime_key(), target);
+        runtime.record_programmatic_position(key.clone(), target);
         Ok(())
     })();
     if let Err(error) = result {
-        return match restore(runtime) {
+        let rollback = restore(runtime);
+        runtime.programmatic_positions.remove(&key);
+        if let Some(position) = previous_programmatic {
+            runtime.programmatic_positions.insert(key.clone(), position);
+        }
+        if let Some(origin) = previous_drag {
+            runtime.completed_drag_origins.insert(key, origin);
+        }
+        return match rollback {
             Ok(()) => Err(error),
             Err(rollback) => Err(anyhow::anyhow!(
                 "{error:#}; snap rollback failed: {rollback:#}"
@@ -2047,10 +2058,96 @@ mod tests {
                 error.to_string().contains("native restore failed"),
                 rollback_fails
             );
-            assert_eq!(
-                runtime.programmatic_positions.get("note:note"),
-                if rollback_fails { None } else { Some(&origin) }
-            );
+            assert_eq!(runtime.programmatic_positions.get("note:note"), None);
+        }
+    }
+
+    #[test]
+    fn failed_snap_does_not_authorize_persisting_an_external_origin() {
+        let origin = PhysicalPosition::new(600, 300);
+        let durable = LogicalPosition::new(20, 300);
+        let geometries = GeometryIndex::default();
+        geometries
+            .insert("note".into(), geometry(origin.x, origin.y, 300, 250))
+            .unwrap();
+        let mut runtime = GroupRuntimeState::default();
+        apply_snap(
+            "note",
+            origin,
+            PhysicalPosition::new(900, 300),
+            &geometries,
+            &mut runtime,
+            |target| geometries.set_position("note", target),
+            || bail!("save failed"),
+            |runtime| {
+                geometries.set_position("note", origin)?;
+                runtime.record_programmatic_position("note:note".into(), origin);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            position_settlement(
+                &mut runtime.programmatic_positions,
+                "note:note",
+                geometries.get("note").unwrap().position,
+                durable,
+                1.0,
+            ),
+            PositionSettlement::ExternalMove
+        );
+    }
+
+    #[test]
+    fn failed_snap_preserves_previous_drag_or_delayed_programmatic_settlement() {
+        for programmatic in [false, true] {
+            let origin = PhysicalPosition::new(600, 300);
+            let previous = PhysicalPosition::new(400, 300);
+            let geometries = GeometryIndex::default();
+            geometries
+                .insert("note".into(), geometry(origin.x, origin.y, 300, 250))
+                .unwrap();
+            let mut runtime = GroupRuntimeState::default();
+            if programmatic {
+                runtime.record_programmatic_position("note:note".into(), previous);
+            } else {
+                runtime.begin_user_drag("note:note".into(), previous);
+                runtime.complete_user_drag("note:note").unwrap();
+            }
+            apply_snap(
+                "note",
+                origin,
+                PhysicalPosition::new(900, 300),
+                &geometries,
+                &mut runtime,
+                |target| geometries.set_position("note", target),
+                || bail!("save failed"),
+                |runtime| {
+                    geometries.set_position("note", origin)?;
+                    runtime.record_programmatic_position("note:note".into(), origin);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            if programmatic {
+                assert_eq!(
+                    position_settlement(
+                        &mut runtime.programmatic_positions,
+                        "note:note",
+                        previous,
+                        previous.to_logical(1.0),
+                        1.0,
+                    ),
+                    PositionSettlement::AdoptProgrammatic(previous)
+                );
+            } else {
+                let drag_origin = runtime.take_completed_drag("note:note").unwrap();
+                assert_eq!(drag_origin, previous);
+                assert!(drag_exceeds_threshold(
+                    drag_origin.to_logical(1.0),
+                    geometries.get("note").unwrap().position.to_logical(1.0),
+                ));
+            }
         }
     }
 

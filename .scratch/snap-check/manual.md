@@ -38,3 +38,19 @@ the probe waits for the event loop before asserting frame changes.
 Final verification: `npm run check` (zero errors/warnings), 44 user-action
 workflow/production-adapter tests, 20 group tests, 23 note repository tests,
 and 2 snap-target tests passed. Existing assertions were unchanged.
+
+Review follow-up, 2026-10-05: repeated the native left snaps with isolated
+production note loading and group restoration, exited, and started a second
+process with the same repository. Native, live, and durable positions remained
+(20, 300) for the pinned note and (340, 300) for the unpinned grouped note;
+pin states were preserved and the grouped note remained detached. This used a
+probe setup rather than the installed app's normal setup.
+
+A forced save failure after externally moving the pinned note to (600, 300)
+restored that native/live origin. Before correction, the next settlement also
+saved (600, 300), incorrectly making the external move durable. After preserving
+the pre-snap settlement tracking during rollback, the same native sequence kept
+the saved position at (20, 300). The external-origin regression failed before
+correction and passed afterward. A second regression preserves pending title-bar
+drag detachment and delayed programmatic settlement through a failed snap.
+Probe instrumentation was removed after verification.
