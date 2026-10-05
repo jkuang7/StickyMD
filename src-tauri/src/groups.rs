@@ -1631,14 +1631,179 @@ pub fn restore_last_closed(app: &AppHandle) -> anyhow::Result<()> {
         .context("Could not focus restored note")
 }
 
+struct RestoreAllStage<W, L, S> {
+    windows: Vec<W>,
+    layouts: Vec<L>,
+    originals: Vec<S>,
+}
+
+fn stage_restore_window<W>(
+    windows: &mut Vec<W>,
+    mut existing: impl FnMut() -> Option<W>,
+    open: impl FnOnce() -> anyhow::Result<W>,
+) -> anyhow::Result<()> {
+    if existing().is_some() {
+        return Ok(());
+    }
+    match open() {
+        Ok(window) => windows.push(window),
+        Err(error) => {
+            if let Some(window) = existing() {
+                windows.push(window);
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn rollback_restore_all<W, L, S>(
+    stage: &RestoreAllStage<W, L, S>,
+    restore_surfaces: impl FnOnce(&[S]) -> anyhow::Result<()>,
+    mut restore_layout: impl FnMut(&L) -> anyhow::Result<()>,
+    mut close_window: impl FnMut(&W) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    restore_every(
+        [
+            restore_surfaces(&stage.originals),
+            restore_every(stage.layouts.iter().rev(), &mut restore_layout),
+            restore_every(stage.windows.iter().rev(), &mut close_window),
+        ],
+        |result| result,
+    )
+}
+
+fn layout_for_restore_all(
+    app: &AppHandle,
+    members: &[StoredGroupMember],
+) -> anyhow::Result<(GroupLayout, Vec<StoredSurface>)> {
+    let mut surfaces = members
+        .iter()
+        .map(|member| stored_surface(app, member))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let open_members = members
+        .iter()
+        .filter(|member| app.get_webview_window(&member.window_label()).is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    let snapshots = snapshots_for_members(app, &open_members)?;
+    let first = surfaces.first().context("Group had no active members")?;
+    let origin = snapshots
+        .iter()
+        .find(|snapshot| snapshot.member == members[0])
+        .map(|snapshot| {
+            snapshot
+                .window
+                .scale_factor()
+                .map(|scale| snapshot.position.to_logical::<i32>(scale))
+        })
+        .transpose()?
+        .unwrap_or(LogicalPosition::new(first.x(), first.y()));
+    let heights = surfaces
+        .iter()
+        .map(StoredSurface::durable_height)
+        .collect::<Vec<_>>();
+    let positions = arranged_positions(origin, &heights)?;
+    for (surface, position) in surfaces.iter_mut().zip(&positions) {
+        surface.set_position(position.x, position.y);
+    }
+    let targets = snapshots
+        .iter()
+        .map(|snapshot| {
+            positions[members
+                .iter()
+                .position(|member| *member == snapshot.member)
+                .unwrap()]
+        })
+        .collect();
+    Ok((GroupLayout { snapshots, targets }, surfaces))
+}
+
 pub fn restore_all_notes(app: &AppHandle) -> anyhow::Result<()> {
     let runtime_state = app.state::<GroupRuntime>();
     let mut runtime = runtime_state.lock()?;
     let repository = app.state::<NoteRepository>();
     let mut archived = repository.archived()?;
     archived.sort_by_key(|note| note.closed_at);
-    for note in archived {
-        restore_archived_note(app, &note, &mut runtime)?;
+    if !archived.is_empty() {
+        let mut stage = RestoreAllStage {
+            windows: Vec::new(),
+            layouts: Vec::new(),
+            originals: Vec::new(),
+        };
+        let restore = (|| -> anyhow::Result<()> {
+            for note in &archived {
+                let label = format!("sticky_{}", note.id);
+                stage_restore_window(
+                    &mut stage.windows,
+                    || app.get_webview_window(&label),
+                    || open_sticky(app, note).context("Could not open archived note"),
+                )?;
+            }
+            let notes = repository.all()?;
+            let active_notes = notes
+                .iter()
+                .map(|note| note.id.clone())
+                .collect::<HashSet<_>>();
+            let archived_ids = archived
+                .iter()
+                .map(|note| note.id.as_str())
+                .collect::<HashSet<_>>();
+            let mut replacements = Vec::new();
+            for group in repository.all_groups()? {
+                if !group.members.iter().any(|member| {
+                    member.kind == GroupMemberKind::Note
+                        && archived_ids.contains(member.id.as_str())
+                }) {
+                    continue;
+                }
+                let members = group
+                    .members
+                    .iter()
+                    .filter(|member| match member.kind {
+                        GroupMemberKind::Note => active_notes.contains(&member.id),
+                        GroupMemberKind::Timer => {
+                            app.get_webview_window(&member.window_label()).is_some()
+                        }
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let (layout, surfaces) = layout_for_restore_all(app, &members)?;
+                stage.layouts.push(layout);
+                apply_layout(
+                    stage.layouts.last().unwrap(),
+                    &app.state::<GeometryIndex>(),
+                    &mut runtime,
+                )?;
+                replacements.extend(surfaces);
+            }
+            stage.originals = persist_surface_changes(app, &replacements)?;
+            repository
+                .restore_all_archived()
+                .context("Could not persist restored notes")?;
+            Ok(())
+        })();
+        if let Err(error) = restore {
+            return Err(include_rollback(
+                error,
+                rollback_restore_all(
+                    &stage,
+                    |originals| replace_surface_batch(app, originals),
+                    |layout| {
+                        restore_snapshots(
+                            &layout.snapshots,
+                            &app.state::<GeometryIndex>(),
+                            &mut runtime,
+                        )
+                    },
+                    |window| {
+                        window
+                            .close()
+                            .context("Could not close staged archived note")
+                    },
+                ),
+            ));
+        }
     }
     open_missing_active_notes(app)?;
     let windows = sorted_windows(app);
@@ -1980,6 +2145,149 @@ mod tests {
         assert_eq!(positions, snapshots.map(|snapshot| snapshot.position));
         assert_eq!(live, snapshots);
         assert_eq!(error.to_string(), "resize 20; resize 282");
+    }
+
+    #[test]
+    fn restore_all_tracks_partial_window_creation_but_leaves_existing_windows_open() {
+        use std::cell::Cell;
+        for fails_after_creation in [false, true] {
+            let existing = Cell::new(None);
+            let mut windows = Vec::new();
+            assert!(stage_restore_window(
+                &mut windows,
+                || existing.get(),
+                || {
+                    if fails_after_creation {
+                        existing.set(Some(42));
+                    }
+                    bail!("open failed")
+                },
+            )
+            .is_err());
+            assert_eq!(
+                windows,
+                if fails_after_creation {
+                    vec![42]
+                } else {
+                    vec![]
+                }
+            );
+        }
+        let mut windows = Vec::new();
+        stage_restore_window(
+            &mut windows,
+            || Some(42),
+            || panic!("existing window reopened"),
+        )
+        .unwrap();
+        assert!(windows.is_empty());
+        stage_restore_window(&mut windows, || None, || Ok(43)).unwrap();
+        assert_eq!(windows, vec![43]);
+    }
+
+    #[test]
+    fn restore_all_rollback_closes_staged_windows_and_restores_every_group() {
+        use std::cell::RefCell;
+        let original = [geometry(10, 20, 300, 250), geometry(10, 282, 300, 24)];
+        for (opened_count, layout_count, saved_layout) in
+            [(1, 0, false), (3, 2, false), (3, 2, true)]
+        {
+            let stage = RestoreAllStage {
+                windows: (0..opened_count).collect::<Vec<_>>(),
+                layouts: (0..layout_count).collect::<Vec<_>>(),
+                originals: if saved_layout { vec![20, 282] } else { vec![] },
+            };
+            let windows = RefCell::new(original);
+            let live = RefCell::new(original);
+            for index in 0..layout_count {
+                windows.borrow_mut()[index].position.y += 50;
+                live.borrow_mut()[index].position.y += 50;
+            }
+            let mut saved_positions = if saved_layout {
+                vec![70, 332]
+            } else {
+                vec![20, 282]
+            };
+            let mut closed = Vec::new();
+            rollback_restore_all(
+                &stage,
+                |positions| {
+                    if !positions.is_empty() {
+                        saved_positions = positions.to_vec();
+                    }
+                    Ok(())
+                },
+                |index| {
+                    restore_snapshot_geometry(
+                        original[*index],
+                        |size| {
+                            windows.borrow_mut()[*index].size = size;
+                            Ok(())
+                        },
+                        |position| {
+                            windows.borrow_mut()[*index].position = position;
+                            Ok(())
+                        },
+                        |geometry| {
+                            live.borrow_mut()[*index] = geometry;
+                            Ok(())
+                        },
+                    )
+                },
+                |window| {
+                    closed.push(*window);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(*windows.borrow(), original);
+            assert_eq!(*live.borrow(), original);
+            closed.sort();
+            assert_eq!(closed, (0..opened_count).collect::<Vec<_>>());
+            assert_eq!(saved_positions, vec![20, 282]);
+        }
+    }
+
+    #[test]
+    fn restore_all_rollback_attempts_every_step_and_reports_all_failures_once() {
+        let stage = RestoreAllStage {
+            windows: vec![0, 1, 2],
+            layouts: vec![0, 1],
+            originals: vec!["saved"],
+        };
+        let mut restored = Vec::new();
+        let mut closed = Vec::new();
+        let error = include_rollback(
+            anyhow::anyhow!("commit"),
+            rollback_restore_all(
+                &stage,
+                |_| bail!("saved positions"),
+                |layout| {
+                    restored.push(*layout);
+                    bail!("geometry {layout}")
+                },
+                |window| {
+                    closed.push(*window);
+                    bail!("close {window}")
+                },
+            ),
+        );
+        restored.sort();
+        closed.sort();
+        assert_eq!(restored, vec![0, 1]);
+        assert_eq!(closed, vec![0, 1, 2]);
+        let message = error.to_string();
+        for failure in [
+            "commit",
+            "saved positions",
+            "geometry 1",
+            "geometry 0",
+            "close 2",
+            "close 1",
+            "close 0",
+        ] {
+            assert_eq!(message.matches(failure).count(), 1);
+        }
     }
 
     #[test]
