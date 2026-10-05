@@ -30,6 +30,9 @@ mod user_action_workflow;
 mod windows;
 
 fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    coordinate_native_quit(app.handle())?;
+
     let repository = NoteRepository::load(app.handle())?;
     app.manage(repository);
 
@@ -160,6 +163,7 @@ pub fn run() {
             set_note_always_on_top,
             set_collapsed,
             acknowledge_quit,
+            fail_quit,
             check_for_update,
             launch_update,
         ])
@@ -185,13 +189,16 @@ pub fn run() {
                             .collect();
                         let has_windows = !labels.is_empty();
                         match coordinator.begin(labels) {
-                            Ok(true) if has_windows => {
-                                if let Err(error) = app.emit("flush_before_quit", ()) {
-                                    log::error!("Could not request final note saves: {error}");
+                            Ok(Some(attempt)) if has_windows => {
+                                if let Err(error) = app.emit("flush_before_quit", attempt) {
+                                    if let Err(error) = stop_quit(app, attempt, &error.to_string())
+                                    {
+                                        log::error!("Could not stop failed quit: {error:#}");
+                                    }
                                 }
                             }
-                            Ok(true) => app.exit(0),
-                            Ok(false) => {}
+                            Ok(Some(_)) => app.exit(0),
+                            Ok(None) => {}
                             Err(error) => log::error!("Could not coordinate quit: {error:#}"),
                         }
                     }
@@ -201,6 +208,15 @@ pub fn run() {
                     }
                 }
             }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } => match app.state::<QuitCoordinator>().destroyed(&label) {
+                Ok(true) => app.exit(0),
+                Ok(false) => {}
+                Err(error) => log::error!("Could not remove destroyed note from quit: {error:#}"),
+            },
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
                 if let Err(error) = focus_existing_or_create(app) {

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Editor } from "@tiptap/core";
-import { createEditorExtensions, holdEditorTyping } from "../src/lib/editorExtensions.ts";
+import { createEditorExtensions, holdEditorTyping, editorFinalSaveLock } from "../src/lib/editorExtensions.ts";
 
 import {
   USER_ACTION_REQUEST_EVENT,
@@ -439,6 +439,27 @@ test("other action saves leave typing enabled", async () => {
     assert.ok(outcomes.every((outcome) => outcome.status === "succeeded"));
     assert.equal(holds, 0);
     assert.equal(saves, 8);
+  } finally {
+    editor.destroy();
+  }
+});
+
+
+test("a failed quit releases the editor unless a close still holds it", () => {
+  const editor = createEditor();
+  try {
+    const lock = editorFinalSaveLock(editor);
+    const releaseClose = holdEditorTyping(editor);
+    lock.beginQuit(1);
+    lock.endQuit(1);
+    assert.equal(editor.isEditable, false);
+    releaseClose();
+    assert.equal(editor.isEditable, true);
+    lock.beginQuit(2);
+    lock.endQuit(1);
+    assert.equal(editor.isEditable, false);
+    lock.endQuit(2);
+    assert.equal(editor.isEditable, true);
   } finally {
     editor.destroy();
   }

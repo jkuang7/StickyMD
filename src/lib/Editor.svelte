@@ -18,7 +18,12 @@
     type SearchResult,
   } from "prosemirror-search";
 
-  import { createEditorExtensions, holdEditorTyping } from "./editorExtensions";
+  import {
+    createEditorExtensions,
+    holdEditorTyping,
+    editorFinalSaveLock,
+  } from "./editorExtensions";
+  import { runQuitSave } from "./finalSaveHolds";
   import Icon from "./Icon.svelte";
 
   interface StickyInit {
@@ -120,7 +125,7 @@
     return holdEditorTyping(editor);
   }
 
-  export async function flushSave(colorOverride?: string) {
+  export async function flushSave(colorOverride?: string, quitAttempt?: number) {
     if (saveTimeout !== undefined) {
       window.clearTimeout(saveTimeout);
       saveTimeout = undefined;
@@ -132,6 +137,10 @@
     const save = saveChain
       .catch(() => undefined)
       .then(async () => {
+        if (
+          quitAttempt !== undefined &&
+          (!editor || !editorFinalSaveLock(editor).isCurrentQuit(quitAttempt))
+        ) return;
         await invoke("save_note", {
           document: snapshot,
           color,
@@ -350,13 +359,16 @@
 
     unlisteners.push(
       await listen("save_request", () => flushSave()),
-      await listen("flush_before_quit", async () => {
-        try {
-          await flushSave();
-          await invoke("acknowledge_quit");
-        } catch (error) {
-          console.error("Could not save note before quitting", error);
-        }
+      await listen<number>("quit_save_failed", ({ payload: attempt }) => {
+        if (editor) editorFinalSaveLock(editor).endQuit(attempt);
+      }),
+      await listen<number>("flush_before_quit", async ({ payload: attempt }) => {
+        if (!editor) return;
+        await runQuitSave(editorFinalSaveLock(editor), attempt, {
+          save: () => flushSave(undefined, attempt),
+          confirm: attempt => invoke("acknowledge_quit", { attempt }),
+          fail: (attempt, error) => invoke("fail_quit", { attempt, error: String(error) }),
+        });
       }),
     );
 

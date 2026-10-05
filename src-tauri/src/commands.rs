@@ -2,6 +2,7 @@ use std::{collections::HashSet, iter::once, sync::Mutex};
 
 use serde_json::Value;
 use tauri::Manager;
+use tauri_plugin_log::log;
 
 use crate::{
     groups::{
@@ -41,53 +42,162 @@ fn left_mouse_button_is_pressed() -> bool {
 enum QuitState {
     #[default]
     Idle,
-    Waiting(HashSet<String>),
+    Waiting {
+        attempt: u64,
+        pending: HashSet<String>,
+    },
     Ready,
 }
 
 #[derive(Default)]
-pub struct QuitCoordinator(Mutex<QuitState>);
+struct QuitProgress {
+    state: QuitState,
+    last_attempt: u64,
+}
 
-impl QuitCoordinator {
-    pub fn begin(&self, labels: HashSet<String>) -> anyhow::Result<bool> {
-        let mut state = self
-            .0
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Quit coordinator lock poisoned"))?;
-        if !matches!(*state, QuitState::Idle) {
-            return Ok(false);
+#[derive(Default)]
+pub struct QuitCoordinator(Mutex<QuitProgress>);
+
+#[cfg(target_os = "macos")]
+pub fn coordinate_native_quit(app: &tauri::AppHandle) -> anyhow::Result<()> {
+    use objc2::{
+        ffi::class_addMethod,
+        msg_send,
+        runtime::{AnyClass, AnyObject, Imp, Sel},
+        sel, MainThreadMarker,
+    };
+    use objc2_app_kit::NSApplication;
+    use std::sync::OnceLock;
+
+    static QUIT_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+    unsafe extern "C-unwind" fn request_coordinated_quit(
+        _: &AnyObject,
+        _: Sel,
+        _: &AnyObject,
+    ) -> usize {
+        if let Some(app) = QUIT_APP.get() {
+            app.exit(0);
         }
-        *state = if labels.is_empty() {
-            QuitState::Ready
-        } else {
-            QuitState::Waiting(labels)
-        };
-        Ok(true)
+        0
     }
 
-    fn acknowledge(&self, label: &str) -> anyhow::Result<bool> {
-        let mut state = self
+    let main_thread = MainThreadMarker::new()
+        .ok_or_else(|| anyhow::anyhow!("Native quit must be configured on the main thread"))?;
+    let application = NSApplication::sharedApplication(main_thread);
+    let delegate: *mut AnyObject = unsafe { msg_send![&*application, delegate] };
+    let delegate = unsafe { delegate.as_ref() }
+        .ok_or_else(|| anyhow::anyhow!("Native application delegate is unavailable"))?;
+    QUIT_APP
+        .set(app.clone())
+        .map_err(|_| anyhow::anyhow!("Native quit is already configured"))?;
+    let callback: unsafe extern "C-unwind" fn(&AnyObject, Sel, &AnyObject) -> usize =
+        request_coordinated_quit;
+    let implementation: Imp = unsafe { std::mem::transmute(callback) };
+    let installed = unsafe {
+        class_addMethod(
+            delegate.class() as *const AnyClass as *mut AnyClass,
+            sel!(applicationShouldTerminate:),
+            implementation,
+            c"Q@:@".as_ptr(),
+        )
+    };
+    anyhow::ensure!(
+        installed.as_bool(),
+        "Could not coordinate native application quit"
+    );
+    Ok(())
+}
+
+impl QuitCoordinator {
+    pub fn begin(&self, labels: HashSet<String>) -> anyhow::Result<Option<u64>> {
+        let mut progress = self
             .0
             .lock()
             .map_err(|_| anyhow::anyhow!("Quit coordinator lock poisoned"))?;
-        let QuitState::Waiting(labels) = &mut *state else {
+        if !matches!(progress.state, QuitState::Idle) {
+            return Ok(None);
+        }
+        progress.last_attempt += 1;
+        let attempt = progress.last_attempt;
+        progress.state = if labels.is_empty() {
+            QuitState::Ready
+        } else {
+            QuitState::Waiting {
+                attempt,
+                pending: labels,
+            }
+        };
+        Ok(Some(attempt))
+    }
+
+    fn acknowledge(&self, label: &str, attempt: u64) -> anyhow::Result<bool> {
+        self.remove_pending(label, Some(attempt))
+    }
+
+    pub fn destroyed(&self, label: &str) -> anyhow::Result<bool> {
+        self.remove_pending(label, None)
+    }
+
+    fn remove_pending(&self, label: &str, expected_attempt: Option<u64>) -> anyhow::Result<bool> {
+        let mut progress = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Quit coordinator lock poisoned"))?;
+        let QuitState::Waiting { attempt, pending } = &mut progress.state else {
             return Ok(false);
         };
-        labels.remove(label);
-        if labels.is_empty() {
-            *state = QuitState::Ready;
+        if expected_attempt.is_some_and(|expected| expected != *attempt) {
+            return Ok(false);
+        }
+        pending.remove(label);
+        if pending.is_empty() {
+            progress.state = QuitState::Ready;
             return Ok(true);
         }
         Ok(false)
     }
 
-    pub fn is_ready(&self) -> anyhow::Result<bool> {
-        let state = self
+    pub fn fail(&self, attempt: u64, notify: impl FnOnce(u64)) -> anyhow::Result<()> {
+        let mut progress = self
             .0
             .lock()
             .map_err(|_| anyhow::anyhow!("Quit coordinator lock poisoned"))?;
-        Ok(matches!(*state, QuitState::Ready))
+        if !matches!(progress.state, QuitState::Waiting { attempt: current, .. } if current == attempt)
+        {
+            return Ok(());
+        }
+        progress.state = QuitState::Idle;
+        drop(progress);
+        notify(attempt);
+        Ok(())
     }
+
+    pub fn is_ready(&self) -> anyhow::Result<bool> {
+        let progress = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Quit coordinator lock poisoned"))?;
+        Ok(matches!(progress.state, QuitState::Ready))
+    }
+}
+
+pub fn stop_quit(app: &tauri::AppHandle, attempt: u64, error: &str) -> anyhow::Result<()> {
+    use tauri::Emitter;
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+    app.state::<QuitCoordinator>().fail(attempt, |attempt| {
+        if let Err(error) = app.emit("quit_save_failed", attempt) {
+            log::error!("Could not notify notes that quit stopped: {error}");
+        }
+        app.dialog()
+            .message(format!(
+                "A note could not be saved and quit stopped.\n{error}"
+            ))
+            .title("Sticky action failed")
+            .kind(MessageDialogKind::Error)
+            .show(|_| {});
+    })
 }
 
 #[tauri::command]
@@ -312,16 +422,22 @@ pub fn set_collapsed(window: tauri::WebviewWindow, collapsed: bool) -> Result<()
 
 #[tauri::command]
 pub fn acknowledge_quit(
+    attempt: u64,
     window: tauri::WebviewWindow,
     coordinator: tauri::State<QuitCoordinator>,
 ) -> Result<(), String> {
     if coordinator
-        .acknowledge(window.label())
+        .acknowledge(window.label(), attempt)
         .map_err(|error| error.to_string())?
     {
         window.app_handle().exit(0);
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn fail_quit(app: tauri::AppHandle, attempt: u64, error: String) -> Result<(), String> {
+    stop_quit(&app, attempt, &error).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -332,19 +448,80 @@ mod tests {
     fn quit_is_ready_only_after_every_window_acknowledges() {
         let coordinator = QuitCoordinator::default();
         assert!(!coordinator.is_ready().unwrap());
-        assert!(coordinator
+        let attempt = coordinator
             .begin(HashSet::from(["one".into(), "two".into()]))
-            .unwrap());
-        assert!(!coordinator.acknowledge("one").unwrap());
+            .unwrap()
+            .unwrap();
+        assert!(!coordinator.acknowledge("one", attempt).unwrap());
         assert!(!coordinator.is_ready().unwrap());
-        assert!(coordinator.acknowledge("two").unwrap());
+        assert!(coordinator.acknowledge("two", attempt).unwrap());
         assert!(coordinator.is_ready().unwrap());
     }
 
     #[test]
     fn quit_without_windows_is_ready_immediately() {
         let coordinator = QuitCoordinator::default();
-        assert!(coordinator.begin(HashSet::new()).unwrap());
+        assert!(coordinator.begin(HashSet::new()).unwrap().is_some());
+        assert!(coordinator.is_ready().unwrap());
+    }
+
+    #[test]
+    fn failed_quit_notifies_all_notes_once_and_retries_every_note() {
+        let coordinator = QuitCoordinator::default();
+        let labels = HashSet::from(["one".into(), "two".into()]);
+        let first = coordinator.begin(labels.clone()).unwrap().unwrap();
+        assert!(coordinator.begin(labels.clone()).unwrap().is_none());
+        assert!(!coordinator.acknowledge("one", first).unwrap());
+        let mut notices = Vec::new();
+        coordinator
+            .fail(first, |attempt| {
+                for label in &labels {
+                    notices.push((label.clone(), attempt));
+                }
+            })
+            .unwrap();
+        coordinator
+            .fail(first, |_| panic!("Duplicate failure notice"))
+            .unwrap();
+        assert_eq!(notices.len(), 2);
+        assert!(notices.iter().all(|(_, attempt)| *attempt == first));
+        assert!(!coordinator.is_ready().unwrap());
+        let second = coordinator.begin(labels).unwrap().unwrap();
+        assert!(second > first);
+        assert!(!coordinator.acknowledge("two", second).unwrap());
+        assert!(!coordinator.is_ready().unwrap());
+        assert!(coordinator.acknowledge("one", second).unwrap());
+    }
+
+    #[test]
+    fn stale_quit_confirmations_and_failures_do_not_end_the_retry() {
+        let coordinator = QuitCoordinator::default();
+        let labels = HashSet::from(["one".into(), "two".into()]);
+        let first = coordinator.begin(labels.clone()).unwrap().unwrap();
+        coordinator.fail(first, |_| {}).unwrap();
+        let second = coordinator.begin(labels).unwrap().unwrap();
+        assert!(!coordinator.acknowledge("one", first).unwrap());
+        coordinator
+            .fail(first, |_| panic!("Stale failure notice"))
+            .unwrap();
+        assert!(!coordinator.acknowledge("two", second).unwrap());
+        assert!(!coordinator.is_ready().unwrap());
+        assert!(coordinator.acknowledge("one", second).unwrap());
+    }
+
+    #[test]
+    fn destroying_the_last_unconfirmed_note_finishes_quit() {
+        let coordinator = QuitCoordinator::default();
+        let attempt = coordinator
+            .begin(HashSet::from(["one".into(), "two".into(), "three".into()]))
+            .unwrap()
+            .unwrap();
+        assert!(!coordinator.destroyed("unknown").unwrap());
+        assert!(!coordinator.acknowledge("one", attempt).unwrap());
+        assert!(!coordinator.destroyed("one").unwrap());
+        assert!(!coordinator.destroyed("two").unwrap());
+        assert!(!coordinator.is_ready().unwrap());
+        assert!(coordinator.destroyed("three").unwrap());
         assert!(coordinator.is_ready().unwrap());
     }
 
