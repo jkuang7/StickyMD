@@ -235,7 +235,7 @@ impl NoteRepository {
         Self::load_from_dir(&app_data_dir)
     }
 
-    fn load_from_dir(app_data_dir: &Path) -> anyhow::Result<Self> {
+    pub(crate) fn load_from_dir(app_data_dir: &Path) -> anyhow::Result<Self> {
         fs::create_dir_all(app_data_dir).context("Failed to create app data directory")?;
         let path = app_data_dir.join(NOTES_DATA);
         let previous_path = app_data_dir.join(PREVIOUS_NOTES_DATA);

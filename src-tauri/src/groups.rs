@@ -612,34 +612,44 @@ fn restore_snapshots(
     snapshots: &[WindowSnapshot],
     geometries: &GeometryIndex,
     runtime: &mut GroupRuntimeState,
-) {
+) -> anyhow::Result<()> {
+    let mut failures = Vec::new();
     for snapshot in snapshots {
         if let Err(error) = snapshot.window.set_size(snapshot.size) {
-            log::error!(
+            failures.push(format!(
                 "Could not restore window {:?} size: {error}",
                 snapshot.member
-            );
+            ));
         }
         let position_restored = if let Err(error) = snapshot.window.set_position(snapshot.position)
         {
-            log::error!(
+            failures.push(format!(
                 "Could not restore window {:?} position: {error}",
                 snapshot.member
-            );
+            ));
             false
         } else {
             true
         };
-        let _ = geometries.insert(
+        if let Err(error) = geometries.insert(
             snapshot.member.id.clone(),
             NoteGeometry {
                 position: snapshot.position,
                 size: snapshot.size,
             },
-        );
+        ) {
+            failures.push(format!("Could not restore live geometry: {error}"));
+        }
         if position_restored {
             runtime.record_programmatic_position(snapshot.member.runtime_key(), snapshot.position);
         }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        let message = failures.join("; ");
+        log::error!("{message}");
+        bail!("{message}")
     }
 }
 
@@ -655,14 +665,14 @@ fn apply_layout(
         let requested = requested_physical_position(snapshot, *target)?;
         if current != *target {
             if let Err(error) = snapshot.window.set_position(*target) {
-                restore_snapshots(&layout.snapshots[..index], geometries, runtime);
+                let _ = restore_snapshots(&layout.snapshots[..index], geometries, runtime);
                 return Err(error).with_context(|| {
                     format!("Could not position group member {:?}", snapshot.member)
                 });
             }
         }
         if let Err(error) = geometries.set_position(&snapshot.member.id, requested) {
-            restore_snapshots(&layout.snapshots[..=index], geometries, runtime);
+            let _ = restore_snapshots(&layout.snapshots[..=index], geometries, runtime);
             return Err(error)
                 .with_context(|| format!("Could not cache group member {:?}", snapshot.member));
         }
@@ -775,7 +785,7 @@ pub fn link_windows_on_this_side_below(
     let originals = match persist_surface_changes(app, &replacements) {
         Ok(originals) => originals,
         Err(error) => {
-            restore_snapshots(&layout.snapshots, &geometries, &mut runtime);
+            let _ = restore_snapshots(&layout.snapshots, &geometries, &mut runtime);
             return Err(error.context("Could not persist linked window positions"));
         }
     };
@@ -795,7 +805,7 @@ pub fn link_windows_on_this_side_below(
     });
     if let Err(error) = persist {
         restore_surface_changes(app, &originals);
-        restore_snapshots(&layout.snapshots, &geometries, &mut runtime);
+        let _ = restore_snapshots(&layout.snapshots, &geometries, &mut runtime);
         return Err(error.context("Could not persist linked group"));
     }
     Ok(())
@@ -858,6 +868,109 @@ fn persist_group_detachment(
     Ok(())
 }
 
+fn persist_detached_note(
+    repository: &NoteRepository,
+    note: StoredNote,
+    group: Option<&StoredGroup>,
+) -> anyhow::Result<()> {
+    repository.mutate(|store| {
+        if let Some(group) = group {
+            persist_group_detachment(store, &group.id, &StoredGroupMember::note(&note.id))?;
+        }
+        store.notes.insert(note.id.clone(), note);
+        Ok(())
+    })
+}
+
+fn apply_snap<M, P, R>(
+    id: &str,
+    origin: PhysicalPosition<i32>,
+    target: PhysicalPosition<i32>,
+    geometries: &GeometryIndex,
+    runtime: &mut GroupRuntimeState,
+    move_window: M,
+    persist: P,
+    restore: R,
+) -> anyhow::Result<()>
+where
+    M: FnOnce(PhysicalPosition<i32>) -> anyhow::Result<()>,
+    P: FnOnce() -> anyhow::Result<()>,
+    R: FnOnce(&mut GroupRuntimeState) -> anyhow::Result<()>,
+{
+    if origin == target {
+        return Ok(());
+    }
+    let key = StoredGroupMember::note(id).runtime_key();
+    let previous_programmatic = runtime.programmatic_positions.get(&key).copied();
+    let previous_drag = runtime.completed_drag_origins.get(&key).copied();
+    let result = (|| {
+        move_window(target)?;
+        geometries.set_position(id, target)?;
+        persist()?;
+        runtime.record_programmatic_position(key.clone(), target);
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let rollback = restore(runtime);
+        runtime.programmatic_positions.remove(&key);
+        if let Some(position) = previous_programmatic {
+            runtime.programmatic_positions.insert(key.clone(), position);
+        }
+        if let Some(origin) = previous_drag {
+            runtime.completed_drag_origins.insert(key, origin);
+        }
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(anyhow::anyhow!(
+                "{error:#}; snap rollback failed: {rollback:#}"
+            )),
+        };
+    }
+    Ok(())
+}
+
+pub(crate) fn move_snapped_note(
+    window: &WebviewWindow,
+    target: PhysicalPosition<i32>,
+    runtime: &mut GroupRuntimeState,
+) -> anyhow::Result<()> {
+    let app = window.app_handle();
+    let id = note_id_from_label(window.label())?;
+    let repository = app.state::<NoteRepository>();
+    let geometries = app.state::<GeometryIndex>();
+    let snapshot = WindowSnapshot {
+        member: StoredGroupMember::note(id),
+        window: window.clone(),
+        position: window.outer_position()?,
+        size: window.outer_size()?,
+    };
+    if snapshot.position == target {
+        return Ok(());
+    }
+    let mut note = repository.get(id)?;
+    let group = repository.group_for_note(id)?;
+    let logical = target.to_logical::<i32>(window.scale_factor()?);
+    note.x = logical.x;
+    note.y = logical.y;
+    apply_snap(
+        id,
+        snapshot.position,
+        target,
+        &geometries,
+        runtime,
+        |position| {
+            window
+                .set_position(position)
+                .context("Could not snap note window")
+        },
+        || {
+            persist_detached_note(&repository, note, group.as_ref())
+                .context("Could not persist snapped note")
+        },
+        |runtime| restore_snapshots(&[snapshot], &geometries, runtime),
+    )
+}
+
 fn detach_member(
     window: &WebviewWindow,
     group: &StoredGroup,
@@ -879,6 +992,13 @@ fn detach_member(
             note.expanded_width = size.width.max(150);
             note.expanded_height = size.height.max(80);
         }
+    }
+    if let StoredSurface::Note(note) = replacement {
+        if let Err(error) = persist_detached_note(&repository, note, Some(group)) {
+            restore_stored_geometry(window, &previous, &geometries, runtime);
+            return Err(error.context("Could not persist group detachment"));
+        }
+        return Ok(());
     }
     let originals = persist_surface_changes(app, &[replacement])?;
     if let Err(error) =
@@ -970,8 +1090,8 @@ fn resize_group_member(
         Ok(())
     })();
     if let Err(error) = native {
-        restore_snapshots(&later_snapshots, &geometries, runtime);
-        restore_snapshots(
+        let _ = restore_snapshots(&later_snapshots, &geometries, runtime);
+        let _ = restore_snapshots(
             std::slice::from_ref(&selected_snapshot),
             &geometries,
             runtime,
@@ -1000,8 +1120,8 @@ fn resize_group_member(
         replacements.push(later);
     }
     if let Err(error) = persist_surface_changes(app, &replacements) {
-        restore_snapshots(&later_snapshots, &geometries, runtime);
-        restore_snapshots(
+        let _ = restore_snapshots(&later_snapshots, &geometries, runtime);
+        let _ = restore_snapshots(
             std::slice::from_ref(&selected_snapshot),
             &geometries,
             runtime,
@@ -1106,7 +1226,7 @@ pub fn resize_note_height(window: &WebviewWindow, height: u32) -> anyhow::Result
             note.expanded_height = logical.height.max(80);
             Ok(())
         }) {
-            restore_snapshots(&[snapshot], &app.state::<GeometryIndex>(), &mut runtime);
+            let _ = restore_snapshots(&[snapshot], &app.state::<GeometryIndex>(), &mut runtime);
             return Err(error.context("Could not persist note height"));
         }
         Ok(())
@@ -1263,7 +1383,8 @@ fn close_group_member(
         Ok(originals) => originals,
         Err(error) => {
             if let Some(layout) = &layout {
-                restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
+                let _ =
+                    restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
             }
             return Err(error.context("Could not persist linked group compaction"));
         }
@@ -1275,7 +1396,7 @@ fn close_group_member(
     }) {
         restore_surface_changes(app, &originals);
         if let Some(layout) = &layout {
-            restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
+            let _ = restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
         }
         return Err(error.context("Could not archive linked group member"));
     }
@@ -1286,7 +1407,7 @@ fn close_group_member(
         });
         restore_surface_changes(app, &originals);
         if let Some(layout) = &layout {
-            restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
+            let _ = restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
         }
         rollback.with_context(|| {
             format!("Could not roll back failed window close after: {close_error}")
@@ -1341,7 +1462,7 @@ fn close_grouped_timer(
     {
         restore_surface_changes(app, &originals);
         if let Some(layout) = &layout {
-            restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
+            let _ = restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
         }
         return Err(error.context("Could not remove timer from linked group"));
     }
@@ -1356,7 +1477,8 @@ fn close_grouped_timer(
             });
             restore_surface_changes(app, &originals);
             if let Some(layout) = &layout {
-                restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
+                let _ =
+                    restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
             }
             return Err(error.context("Could not delete linked timer"));
         }
@@ -1371,7 +1493,7 @@ fn close_grouped_timer(
         })?;
         restore_surface_changes(app, &originals);
         if let Some(layout) = &layout {
-            restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
+            let _ = restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
         }
         return Err(close_error.into());
     }
@@ -1457,7 +1579,8 @@ fn restore_archived_note(
         if let Err(error) = persist {
             restore_surface_changes(app, &originals);
             if let Some(layout) = &layout {
-                restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
+                let _ =
+                    restore_snapshots(&layout.snapshots, &app.state::<GeometryIndex>(), runtime);
             }
             return Err(error.context("Could not persist restored group member"));
         }
@@ -1709,11 +1832,11 @@ pub fn reset_window_positions(app: &AppHandle) -> anyhow::Result<()> {
     }
     for (index, (snapshot, target)) in snapshots.iter().zip(&targets).enumerate() {
         if let Err(error) = snapshot.window.set_position(*target) {
-            restore_snapshots(&snapshots[..index], &geometries, &mut runtime);
+            let _ = restore_snapshots(&snapshots[..index], &geometries, &mut runtime);
             return Err(error.into());
         }
         if let Err(error) = geometries.set_position(&snapshot.member.id, *target) {
-            restore_snapshots(&snapshots[..=index], &geometries, &mut runtime);
+            let _ = restore_snapshots(&snapshots[..=index], &geometries, &mut runtime);
             return Err(error.context("Could not cache reset window position"));
         }
         runtime.record_programmatic_position(snapshot.member.runtime_key(), *target);
@@ -1731,14 +1854,14 @@ pub fn reset_window_positions(app: &AppHandle) -> anyhow::Result<()> {
     {
         Ok(replacements) => replacements,
         Err(error) => {
-            restore_snapshots(&snapshots, &geometries, &mut runtime);
+            let _ = restore_snapshots(&snapshots, &geometries, &mut runtime);
             return Err(error.context("Could not prepare reset window positions"));
         }
     };
     let original_surfaces = match persist_surface_changes(app, &replacements) {
         Ok(originals) => originals,
         Err(error) => {
-            restore_snapshots(&snapshots, &geometries, &mut runtime);
+            let _ = restore_snapshots(&snapshots, &geometries, &mut runtime);
             return Err(error.context("Could not persist reset window positions"));
         }
     };
@@ -1747,7 +1870,7 @@ pub fn reset_window_positions(app: &AppHandle) -> anyhow::Result<()> {
         Ok(())
     }) {
         restore_surface_changes(app, &original_surfaces);
-        restore_snapshots(&snapshots, &geometries, &mut runtime);
+        let _ = restore_snapshots(&snapshots, &geometries, &mut runtime);
         return Err(error.context("Could not unlink windows after resetting their positions"));
     }
     snapshots
@@ -1776,7 +1899,7 @@ pub fn restore_group_layouts(app: &AppHandle) -> anyhow::Result<()> {
     for (index, layout) in layouts.iter().enumerate() {
         if let Err(error) = apply_layout(layout, &geometries, &mut runtime) {
             for applied in &layouts[..index] {
-                restore_snapshots(&applied.snapshots, &geometries, &mut runtime);
+                let _ = restore_snapshots(&applied.snapshots, &geometries, &mut runtime);
             }
             return Err(error.context("Could not restore linked group layouts"));
         }
@@ -1790,7 +1913,7 @@ pub fn restore_group_layouts(app: &AppHandle) -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     if let Err(error) = persist_surface_changes(app, &replacements) {
         for layout in &layouts {
-            restore_snapshots(&layout.snapshots, &geometries, &mut runtime);
+            let _ = restore_snapshots(&layout.snapshots, &geometries, &mut runtime);
         }
         return Err(error.context("Could not persist restored linked group layouts"));
     }
@@ -1806,6 +1929,291 @@ mod tests {
             position: PhysicalPosition::new(x, y),
             size: PhysicalSize::new(width, height),
         }
+    }
+
+    #[test]
+    fn snap_moves_saves_detaches_and_settles_pinned_or_unpinned_notes() {
+        for pinned in [false, true] {
+            let dir = std::env::temp_dir().join(format!("stickymd-snap-{}", uuid::Uuid::new_v4()));
+            let repository = NoteRepository::load_from_dir(&dir).unwrap();
+            let mut note = repository.active().unwrap().remove(0);
+            note.pinned = pinned;
+            let id = note.id.clone();
+            let other = StoredNote::new();
+            let group = StoredGroup {
+                id: "group".into(),
+                members: vec![
+                    StoredGroupMember::note(&id),
+                    StoredGroupMember::note(&other.id),
+                ],
+            };
+            repository
+                .mutate(|store| {
+                    store.notes.insert(id.clone(), note.clone());
+                    store.notes.insert(other.id.clone(), other.clone());
+                    store.groups.insert(group.id.clone(), group.clone());
+                    Ok(())
+                })
+                .unwrap();
+            let geometries = GeometryIndex::default();
+            geometries
+                .insert(id.clone(), geometry(400, 300, 300, 250))
+                .unwrap();
+            let native_position = std::cell::Cell::new(PhysicalPosition::new(400, 300));
+            let mut runtime = GroupRuntimeState::default();
+            for target in [
+                PhysicalPosition::new(20, 300),
+                PhysicalPosition::new(-980, 120),
+            ] {
+                note.x = target.x;
+                note.y = target.y;
+                let current_group = repository.group_for_note(&id).unwrap();
+                apply_snap(
+                    &id,
+                    native_position.get(),
+                    target,
+                    &geometries,
+                    &mut runtime,
+                    |position| {
+                        native_position.set(position);
+                        Ok(())
+                    },
+                    || {
+                        assert_eq!(native_position.get(), target);
+                        assert_eq!(geometries.get(&id).unwrap().position, target);
+                        persist_detached_note(&repository, note.clone(), current_group.as_ref())
+                    },
+                    |_| panic!("successful snap must not roll back"),
+                )
+                .unwrap();
+                assert_eq!(native_position.get(), target);
+                assert!(repository.group_for_note(&id).unwrap().is_none());
+                let reopened = NoteRepository::load_from_dir(&dir)
+                    .unwrap()
+                    .get(&id)
+                    .unwrap();
+                assert_eq!(
+                    (reopened.x, reopened.y, reopened.pinned),
+                    (target.x, target.y, pinned)
+                );
+                assert_eq!(
+                    position_settlement(
+                        &mut runtime.programmatic_positions,
+                        &StoredGroupMember::note(&id).runtime_key(),
+                        target,
+                        LogicalPosition::new(note.x, note.y),
+                        1.0
+                    ),
+                    PositionSettlement::AdoptProgrammatic(target)
+                );
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn snap_failure_restores_native_and_live_position_and_reports_rollback_failure() {
+        for rollback_fails in [false, true] {
+            let origin = PhysicalPosition::new(400, 300);
+            let target = PhysicalPosition::new(20, 300);
+            let geometries = GeometryIndex::default();
+            geometries
+                .insert("note".into(), geometry(400, 300, 300, 250))
+                .unwrap();
+            let native_position = std::cell::Cell::new(origin);
+            let mut runtime = GroupRuntimeState::default();
+            let error = apply_snap(
+                "note",
+                origin,
+                target,
+                &geometries,
+                &mut runtime,
+                |position| {
+                    native_position.set(position);
+                    Ok(())
+                },
+                || {
+                    assert_eq!(native_position.get(), target);
+                    assert_eq!(geometries.get("note").unwrap().position, target);
+                    bail!("save failed")
+                },
+                |runtime| {
+                    geometries.set_position("note", origin)?;
+                    if rollback_fails {
+                        bail!("native restore failed");
+                    }
+                    native_position.set(origin);
+                    runtime.record_programmatic_position("note:note".into(), origin);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(geometries.get("note").unwrap().position, origin);
+            assert_eq!(
+                native_position.get(),
+                if rollback_fails { target } else { origin }
+            );
+            assert!(error.to_string().contains("save failed"));
+            assert_eq!(
+                error.to_string().contains("native restore failed"),
+                rollback_fails
+            );
+            assert_eq!(runtime.programmatic_positions.get("note:note"), None);
+        }
+    }
+
+    #[test]
+    fn failed_snap_does_not_authorize_persisting_an_external_origin() {
+        let origin = PhysicalPosition::new(600, 300);
+        let durable = LogicalPosition::new(20, 300);
+        let geometries = GeometryIndex::default();
+        geometries
+            .insert("note".into(), geometry(origin.x, origin.y, 300, 250))
+            .unwrap();
+        let mut runtime = GroupRuntimeState::default();
+        apply_snap(
+            "note",
+            origin,
+            PhysicalPosition::new(900, 300),
+            &geometries,
+            &mut runtime,
+            |target| geometries.set_position("note", target),
+            || bail!("save failed"),
+            |runtime| {
+                geometries.set_position("note", origin)?;
+                runtime.record_programmatic_position("note:note".into(), origin);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            position_settlement(
+                &mut runtime.programmatic_positions,
+                "note:note",
+                geometries.get("note").unwrap().position,
+                durable,
+                1.0,
+            ),
+            PositionSettlement::ExternalMove
+        );
+    }
+
+    #[test]
+    fn failed_snap_preserves_previous_drag_or_delayed_programmatic_settlement() {
+        for programmatic in [false, true] {
+            let origin = PhysicalPosition::new(600, 300);
+            let previous = PhysicalPosition::new(400, 300);
+            let geometries = GeometryIndex::default();
+            geometries
+                .insert("note".into(), geometry(origin.x, origin.y, 300, 250))
+                .unwrap();
+            let mut runtime = GroupRuntimeState::default();
+            if programmatic {
+                runtime.record_programmatic_position("note:note".into(), previous);
+            } else {
+                runtime.begin_user_drag("note:note".into(), previous);
+                runtime.complete_user_drag("note:note").unwrap();
+            }
+            apply_snap(
+                "note",
+                origin,
+                PhysicalPosition::new(900, 300),
+                &geometries,
+                &mut runtime,
+                |target| geometries.set_position("note", target),
+                || bail!("save failed"),
+                |runtime| {
+                    geometries.set_position("note", origin)?;
+                    runtime.record_programmatic_position("note:note".into(), origin);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            if programmatic {
+                assert_eq!(
+                    position_settlement(
+                        &mut runtime.programmatic_positions,
+                        "note:note",
+                        previous,
+                        previous.to_logical(1.0),
+                        1.0,
+                    ),
+                    PositionSettlement::AdoptProgrammatic(previous)
+                );
+            } else {
+                let drag_origin = runtime.take_completed_drag("note:note").unwrap();
+                assert_eq!(drag_origin, previous);
+                assert!(drag_exceeds_threshold(
+                    drag_origin.to_logical(1.0),
+                    geometries.get("note").unwrap().position.to_logical(1.0),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn snap_move_or_live_cache_failure_rolls_back_before_any_save() {
+        for native_fails in [false, true] {
+            let origin = PhysicalPosition::new(400, 300);
+            let target = PhysicalPosition::new(20, 300);
+            let geometries = GeometryIndex::default();
+            if native_fails {
+                geometries
+                    .insert("note".into(), geometry(400, 300, 300, 250))
+                    .unwrap();
+            }
+            let native_position = std::cell::Cell::new(origin);
+            let mut runtime = GroupRuntimeState::default();
+            let error = apply_snap(
+                "note",
+                origin,
+                target,
+                &geometries,
+                &mut runtime,
+                |position| {
+                    if native_fails {
+                        bail!("native move failed");
+                    }
+                    native_position.set(position);
+                    Ok(())
+                },
+                || panic!("failed move/cache must not save"),
+                |runtime| {
+                    native_position.set(origin);
+                    geometries.insert("note".into(), geometry(400, 300, 300, 250))?;
+                    runtime.record_programmatic_position("note:note".into(), origin);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(native_position.get(), origin);
+            assert_eq!(geometries.get("note").unwrap().position, origin);
+            assert_eq!(
+                error.to_string().contains("native move failed"),
+                native_fails
+            );
+        }
+    }
+
+    #[test]
+    fn unmoving_snap_has_no_native_store_or_runtime_effects() {
+        let origin = PhysicalPosition::new(20, 300);
+        let geometries = GeometryIndex::default();
+        let mut runtime = GroupRuntimeState::default();
+        runtime.completed_drag_origins.insert("note".into(), origin);
+        apply_snap(
+            "note",
+            origin,
+            origin,
+            &geometries,
+            &mut runtime,
+            |_| panic!("no move"),
+            || panic!("no save or detachment"),
+            |_| panic!("no restore"),
+        )
+        .unwrap();
+        assert_eq!(runtime.completed_drag_origins.get("note"), Some(&origin));
+        assert!(runtime.programmatic_positions.is_empty());
     }
 
     #[test]
