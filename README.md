@@ -51,3 +51,5 @@ Press `Command-/` inside Sticky to see its keyboard shortcuts.
 Quit Sticky, move `/Applications/Sticky.app` to the Trash, and delete `~/StickyMD`. Your saved notes remain in the folder above unless you delete it too.
 
 Development and architecture details are in [PLOT.md](PLOT.md).
+
+Release both macOS DMGs locally with `npm run release:macos` from a clean, pushed commit and an unused version tag (preview: `npm run release:macos -- --dry-run`); no hosted CI.
