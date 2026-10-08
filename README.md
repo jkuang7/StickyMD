@@ -52,4 +52,4 @@ Quit Sticky, move `/Applications/Sticky.app` to the Trash, and delete `~/StickyM
 
 Development and architecture details are in [PLOT.md](PLOT.md).
 
-Release locally with `npm run release:macos` (preview: `npm run release:macos -- --dry-run`), with `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` set; no hosted CI.
+Release both macOS DMGs locally with `npm run release:macos` from a clean, pushed commit and an unused version tag (preview: `npm run release:macos -- --dry-run`); no hosted CI.

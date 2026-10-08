@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Signing credentials stay in the environment; never expand them into commands.
-set +x
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -18,22 +16,11 @@ if [[ $# -gt 1 ]]; then
 fi
 
 if ! "$DRY_RUN"; then
-  if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:+set}" || -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD+set}" ]]; then
-    echo "Release refused: set TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD (an empty password is allowed). Signing credentials must be supplied via environment variables." >&2
+  TREE_STATUS="$(git --no-optional-locks status --porcelain)"
+  if [[ -n "$TREE_STATUS" ]]; then
+    echo "Release refused: working tree is dirty. Commit or remove changes before releasing." >&2
     exit 1
   fi
-  if [[ "$(uname -s)" != Darwin ]]; then
-    echo "Release requires macOS." >&2
-    exit 1
-  fi
-  for command in node npm cargo rustup gh; do
-    command -v "$command" >/dev/null || { echo "Missing required command: $command" >&2; exit 1; }
-  done
-  [[ -d node_modules ]] || { echo "Frontend dependencies missing: run npm ci." >&2; exit 1; }
-  installed_targets="$(rustup target list --installed)"
-  for target in aarch64-apple-darwin x86_64-apple-darwin; do
-    [[ "$installed_targets" == *"$target"* ]] || { echo "Missing Rust target: run rustup target add $target" >&2; exit 1; }
-  done
 fi
 
 # Resolve Tauri's version-file form and refuse inconsistent release versions.
@@ -51,19 +38,53 @@ if (version !== pkg.version || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za
 }
 const name = config.productName || pkg.name;
 if (!/^[A-Za-z0-9 ._-]+$/.test(name)) throw new Error('Unsupported productName for macOS artifact paths');
-const needsLatest = (config.plugins?.updater?.endpoints || []).some(url => url.includes('latest.json'));
 console.log(version);
 console.log(name);
-console.log(needsLatest);
 console.log(path.resolve(process.env.CARGO_TARGET_DIR || 'src-tauri/target'));
 JS
 )"
-IFS=$'\n' read -r -d '' VERSION PRODUCT_NAME NEEDS_LATEST CARGO_TARGET_DIR <<< "$METADATA" || true
+IFS=$'\n' read -r -d '' VERSION PRODUCT_NAME CARGO_TARGET_DIR <<< "$METADATA" || true
 export CARGO_TARGET_DIR
 TAG="md-sticky-v$VERSION"
 OUTPUT_DIR="$ROOT_DIR/dist/$TAG"
-BUILD_CONFIG='{"bundle":{"targets":["app","dmg"],"createUpdaterArtifacts":true}}'
+BUILD_CONFIG='{"bundle":{"targets":["app","dmg"]}}'
 ARTIFACTS=()
+
+if "$DRY_RUN"; then
+  echo '# Dry run: skipping clean-tree, pushed-HEAD, existing-tag, and build prerequisites.'
+  echo 'RELEASE_SHA=$(git rev-parse HEAD)'
+  RELEASE_SHA='$RELEASE_SHA'
+else
+  RELEASE_SHA="$(git rev-parse HEAD)"
+  if [[ -z "$(git branch -r --contains "$RELEASE_SHA")" ]]; then
+    echo "Release refused: HEAD is not contained in a remote branch. Push it before releasing." >&2
+    exit 1
+  fi
+  if git show-ref --verify --quiet "refs/tags/$TAG"; then
+    echo "Release refused: tag $TAG already exists locally." >&2
+    exit 1
+  fi
+  if ! REMOTE_TAG="$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"; then
+    echo "Release refused: could not check origin for tag $TAG." >&2
+    exit 1
+  fi
+  if [[ -n "$REMOTE_TAG" ]]; then
+    echo "Release refused: tag $TAG already exists on origin." >&2
+    exit 1
+  fi
+  if [[ "$(uname -s)" != Darwin ]]; then
+    echo "Release requires macOS." >&2
+    exit 1
+  fi
+  for command in node npm cargo rustup gh; do
+    command -v "$command" >/dev/null || { echo "Missing required command: $command" >&2; exit 1; }
+  done
+  [[ -d node_modules ]] || { echo "Frontend dependencies missing: run npm ci." >&2; exit 1; }
+  installed_targets="$(rustup target list --installed)"
+  for target in aarch64-apple-darwin x86_64-apple-darwin; do
+    [[ "$installed_targets" == *"$target"* ]] || { echo "Missing Rust target: run rustup target add $target" >&2; exit 1; }
+  done
+fi
 
 run() {
   if "$DRY_RUN"; then
@@ -94,43 +115,12 @@ for target in aarch64-apple-darwin x86_64-apple-darwin; do
   DMG_ARCH="$ARCH"
   [[ "$ARCH" != x86_64 ]] || DMG_ARCH=x64
   DMG="$BUNDLE_DIR/dmg/${PRODUCT_NAME}_${VERSION}_${DMG_ARCH}.dmg"
-  ARCHIVE="$BUNDLE_DIR/macos/$PRODUCT_NAME.app.tar.gz"
-  # Both target builds use the same archive basename; give release assets unique names.
-  RELEASE_ARCHIVE="$OUTPUT_DIR/${PRODUCT_NAME}_${VERSION}_${ARCH}.app.tar.gz"
-  for artifact in "$DMG" "$ARCHIVE" "$ARCHIVE.sig"; do
-    require_artifact "$artifact"
-  done
+  require_artifact "$DMG"
   run cp "$DMG" "$OUTPUT_DIR/"
-  run cp "$ARCHIVE" "$RELEASE_ARCHIVE"
-  run cp "$ARCHIVE.sig" "$RELEASE_ARCHIVE.sig"
-  ARTIFACTS+=("$OUTPUT_DIR/$(basename "$DMG")" "$RELEASE_ARCHIVE" "$RELEASE_ARCHIVE.sig")
+  ARTIFACTS+=("$OUTPUT_DIR/$(basename "$DMG")")
 done
 
-if [[ "$NEEDS_LATEST" == true ]]; then
-  # A static updater endpoint needs a manifest matching the renamed signed assets.
-  LATEST_CODE='const fs = require("node:fs");
-const [version, name, dir, tag, repo] = process.argv.slice(1);
-const platforms = {};
-for (const [arch, key] of [["aarch64", "darwin-aarch64"], ["x86_64", "darwin-x86_64"]]) {
-  const file = `${name}_${version}_${arch}.app.tar.gz`;
-  platforms[key] = {
-    signature: fs.readFileSync(`${dir}/${file}.sig`, "utf8").trim(),
-    url: `https://github.com/${repo}/releases/download/${tag}/${encodeURIComponent(file)}`
-  };
-}
-fs.writeFileSync(`${dir}/latest.json`, JSON.stringify({version, notes: "See the assets to download this version and install.", pub_date: new Date().toISOString(), platforms}, null, 2) + "\n");'
-  if "$DRY_RUN"; then
-    echo 'RELEASE_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)'
-    printf '%q ' node --input-type=commonjs -e "$LATEST_CODE" "$VERSION" "$PRODUCT_NAME" "$OUTPUT_DIR" "$TAG"
-    printf '"$RELEASE_REPO"\n'
-  else
-    RELEASE_REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
-    run node --input-type=commonjs -e "$LATEST_CODE" "$VERSION" "$PRODUCT_NAME" "$OUTPUT_DIR" "$TAG" "$RELEASE_REPO"
-  fi
-  ARTIFACTS+=("$OUTPUT_DIR/latest.json")
-fi
-
-run gh release create "$TAG" --draft --target "$(git rev-parse HEAD)" \
+run gh release create "$TAG" --draft --target "$RELEASE_SHA" \
   --title "Md-Sticky v$VERSION" \
   --notes 'See the assets to download this version and install.' \
   "${ARTIFACTS[@]}"
